@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}青鹭收银{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}?v=20260814n" rel="stylesheet">
+</head>
+<body data-page="{% block page_name %}{% endblock %}">
+    {% if user %}
+    <nav class="sidebar" id="sidebar">
+        <div class="brand">
+            <h5><i class="bi bi-tiles"></i> 青鹭雀庄</h5>
+            <small>收银系统 v2.0</small>
+        </div>
+        <ul class="nav flex-column mt-2">
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'dashboard' %}active{% endif %}" href="/">
+                    <i class="bi bi-speedometer2"></i> 台桌总览
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'lottery' %}active{% endif %}" href="/lottery">
+                    <i class="bi bi-gift"></i> 抽奖管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'products' %}active{% endif %}" href="/products">
+                    <i class="bi bi-cup-straw"></i> 商品管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'members' %}active{% endif %}" href="/members">
+                    <i class="bi bi-credit-card-2-front"></i> 会员管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'staff_mgmt' %}active{% endif %}" href="/staff">
+                    <i class="bi bi-people-fill"></i> 场务管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'competition' %}active{% endif %}" href="/competition">
+                    <i class="bi bi-graph-up-arrow"></i> 竞争情报
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'operations' %}active{% endif %}" href="/operations">
+                    <i class="bi bi-brain"></i> 运营驾驶舱
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'staff_tasks' %}active{% endif %}" href="/staff_tasks">
+                    <i class="bi bi-clipboard-check"></i> 店员工作台
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'table_matcher' %}active{% endif %}" href="/table_matcher">
+                    <i class="bi bi-people-fill"></i> 智能组局
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'session_feedback' %}active{% endif %}" href="/session_feedback">
+                    <i class="bi bi-chat-square-heart"></i> 桌局反馈
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'operation_review' %}active{% endif %}" href="/operation_review">
+                    <i class="bi bi-graph-up-arrow"></i> 运营复盘
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'analytics' %}active{% endif %}" href="/analytics">
+                    <i class="bi bi-pie-chart-fill"></i> 分析中心
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'players' %}active{% endif %}" href="/players">
+                    <i class="bi bi-people"></i> 玩家档案
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'daily' %}active{% endif %}" href="/daily">
+                    <i class="bi bi-receipt"></i> 日结报表
+                </a>
+            </li>
+            {% if user.role == 'admin' %}
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'users' %}active{% endif %}" href="/users">
+                    <i class="bi bi-person-gear"></i> 用户管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="/settings">
+                    <i class="bi bi-gear"></i> 系统设置
+                </a>
+            </li>
+            {% endif %}
+        </ul>
+        <div class="sidebar-footer">
+            <div class="user-info">
+                <i class="bi bi-person-circle"></i>
+                <span>{{ user.name }}</span>
+                <small>{{ user.role }}</small>
+            </div>
+            <a href="/logout" class="btn btn-sm btn-outline-light w-100 mt-2">
+                <i class="bi bi-box-arrow-right"></i> 退出
+            </a>
+        </div>
+    </nav>
+    <button class="sidebar-toggle d-md-none" onclick="document.getElementById('sidebar').classList.toggle('show')">
+        <i class="bi bi-list"></i>
+    </button>
+    {% endif %}
+    <div class="main-content">
+        {% block content %}{% endblock %}
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=20260814q"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

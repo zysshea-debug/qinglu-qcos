@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}玩家档案 - 青鹭收银{% endblock %}
+{% block page_name %}players{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-people"></i> 玩家档案</h4>
+    <div class="d-flex gap-2 flex-wrap">
+        <input type="text" class="form-control form-control-sm" id="playerSearch" placeholder="搜索姓名/手机/微信/ID..." style="width:220px" oninput="searchPlayers()">
+        <select class="form-select form-select-sm" id="filterActivity" style="width:110px" onchange="searchPlayers()">
+            <option value="">全部活跃度</option>
+            <option value="高">高</option>
+            <option value="中">中</option>
+            <option value="低">低</option>
+            <option value="沉睡">沉睡</option>
+        </select>
+        <select class="form-select form-select-sm" id="filterType" style="width:110px" onchange="searchPlayers()">
+            <option value="">全部类型</option>
+            <option value="竞技">竞技</option>
+            <option value="娱乐">娱乐</option>
+        </select>
+        <select class="form-select form-select-sm" id="filterOrganizer" style="width:110px" onchange="searchPlayers()">
+            <option value="">全部</option>
+            <option value="yes">组织者</option>
+            <option value="no">非组织者</option>
+        </select>
+        <button class="btn btn-outline-primary btn-sm" onclick="openPlayerModal()">
+            <i class="bi bi-plus-circle"></i> 添加玩家
+        </button>
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="row g-2 mb-3" id="playerStats">
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-people text-primary"></i> 总玩家</div>
+            <div class="value" id="statTotal">0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-fire text-danger"></i> 高活跃</div>
+            <div class="value" id="statHigh">0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-trophy text-warning"></i> 竞技</div>
+            <div class="value" id="statCompetitive">0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-megaphone text-success"></i> 组织者</div>
+            <div class="value" id="statOrganizer">0</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr>
+                    <th>昵称</th><th>活跃度</th><th>类型</th><th>到店</th><th>最近</th><th>组织者</th><th>手机</th><th>微信</th><th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="playerList"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 玩家编辑弹窗 -->
+<div class="modal fade" id="playerModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="playerModalTitle">添加玩家</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="playerId">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">昵称 *</label>
+                        <input type="text" class="form-control" id="playerNameInput" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">真实姓名</label>
+                        <input type="text" class="form-control" id="playerRealName">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">希望称呼</label>
+                        <input type="text" class="form-control" id="playerPreferredName">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-3">
+                        <label class="form-label">手机</label>
+                        <input type="text" class="form-control" id="playerPhone">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">微信</label>
+                        <input type="text" class="form-control" id="playerWechat">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">性别</label>
+                        <select class="form-select" id="playerGender">
+                            <option value="">-</option>
+                            <option value="男">男</option>
+                            <option value="女">女</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">生日</label>
+                        <input type="text" class="form-control" id="playerBirthday" placeholder="如: 1995-06-15">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-3">
+                        <label class="form-label">段位</label>
+                        <input type="text" class="form-control" id="playerDan" placeholder="如: 雀豪">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">段位来源</label>
+                        <select class="form-select" id="playerDanSource">
+                            <option value="self">自报</option>
+                            <option value="store">店内核算</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">玩家类型</label>
+                        <select class="form-select" id="playerTypeSelect">
+                            <option value="">-</option>
+                            <option value="竞技">竞技</option>
+                            <option value="娱乐">娱乐</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">K值/水平</label>
+                        <input type="text" class="form-control" id="playerSkillLevel">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-3">
+                        <label class="form-label">活跃度</label>
+                        <select class="form-select" id="playerActivityLevel">
+                            <option value="">-</option>
+                            <option value="高">高</option>
+                            <option value="中">中</option>
+                            <option value="低">低</option>
+                            <option value="沉睡">沉睡</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">维护优先级</label>
+                        <select class="form-select" id="playerMaintenancePriority">
+                            <option value="">-</option>
+                            <option value="高">高</option>
+                            <option value="中">中</option>
+                            <option value="低">低</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">社区组织者</label>
+                        <select class="form-select" id="playerIsOrganizer">
+                            <option value="0">否</option>
+                            <option value="1">是</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">组织者等级</label>
+                        <input type="text" class="form-control" id="playerOrganizerLevel">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-4">
+                        <label class="form-label">常住区域</label>
+                        <input type="text" class="form-control" id="playerArea">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">职业</label>
+                        <input type="text" class="form-control" id="playerOccupation">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">行业</label>
+                        <input type="text" class="form-control" id="playerIndustry">
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-3">
+                        <label class="form-label">来源渠道</label>
+                        <input type="text" class="form-control" id="playerSourceChannel">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">介绍人</label>
+                        <input type="text" class="form-control" id="playerIntroducer">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">饮品偏好</label>
+                        <input type="text" class="form-control" id="playerDrinkPreference">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">价格敏感度</label>
+                        <select class="form-select" id="playerPriceSensitivity">
+                            <option value="">-</option>
+                            <option value="高">高</option>
+                            <option value="中">中</option>
+                            <option value="低">低</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-md-6">
+                        <label class="form-label">营销标签</label>
+                        <input type="text" class="form-control" id="playerMarketingTags" placeholder="如: 高价值, 易流失, 推荐人">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">风险标签</label>
+                        <input type="text" class="form-control" id="playerRiskTags" placeholder="如: 流失风险, 投诉记录">
+                    </div>
+                </div>
+                <div class="mb-3 mt-3">
+                    <label class="form-label">QCOS ID</label>
+                    <input type="text" class="form-control" id="playerQcosId" placeholder="如: P001">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注 / 重要提醒</label>
+                    <textarea class="form-control" id="playerNotes" rows="2"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="savePlayer()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 玩家详情弹窗 -->
+<div class="modal fade" id="playerDetailModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-person-circle"></i> 玩家详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="playerDetailBody">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" id="detailEditBtn">编辑</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

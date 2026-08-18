@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}系统设置 - 青鹭收银{% endblock %}
+{% block page_name %}settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-gear"></i> 系统设置</h4>
+</div>
+
+<div class="row g-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">费率设置</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-6">
+                        <label class="form-label">八口机 正常价 (¥/小时)</label>
+                        <input type="number" class="form-control" id="rate_8port" step="0.5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">四口机 正常价 (¥/小时)</label>
+                        <input type="number" class="form-control" id="rate_4port" step="0.5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">八口机 通宵价 (¥)</label>
+                        <input type="number" class="form-control" id="overnight_8port" step="5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">四口机 通宵价 (¥)</label>
+                        <input type="number" class="form-control" id="overnight_4port" step="5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">自助时段费率倍数</label>
+                        <input type="number" class="form-control" id="selfservice_multiplier" step="0.1" min="0" max="1">
+                        <div class="form-text">0.5 = 半价</div>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">取整方式</label>
+                        <select class="form-select" id="rounding">
+                            <option value="none">不取整（精确到分）</option>
+                            <option value="up_half_hour">向上取整到半小时</option>
+                            <option value="up_hour">向上取整到小时</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">抽奖配置</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-6">
+                        <label class="form-label">免单 数量</label>
+                        <input type="number" class="form-control" id="lottery_free_count" min="0">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">免单 最高抵扣 (¥)</label>
+                        <input type="number" class="form-control" id="lottery_free_max" step="5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">半价 数量</label>
+                        <input type="number" class="form-control" id="lottery_half_count" min="0">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">半价 最高抵扣 (¥)</label>
+                        <input type="number" class="form-control" id="lottery_half_max" step="5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">八折 数量</label>
+                        <input type="number" class="form-control" id="lottery_discount_count" min="0">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">八折 最高抵扣 (¥)</label>
+                        <input type="number" class="form-control" id="lottery_discount_max" step="5">
+                    </div>
+                </div>
+                <div class="alert alert-info mt-3 mb-0">
+                    <small><strong>时段说明</strong><br>
+                    正常时段 12:00-24:00 → 按小时计费<br>
+                    通宵时段 00:00-08:00 → 包夜固定价<br>
+                    自助时段 08:00-12:00 → 正常价 × 倍数</small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="mt-4">
+    <button class="btn btn-primary btn-lg" id="saveSettingsBtn">
+        <i class="bi bi-check-circle"></i> 保存设置
+    </button>
+</div>
+{% endblock %}

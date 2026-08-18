@@ -1,0 +1,300 @@
+{% extends 'base.html' %}
+{% block title %}竞争情报 - 青鹭雀庄{% endblock %}
+{% block page_name %}competition{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-3">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 class="mb-0"><i class="bi bi-graph-up-arrow"></i> 竞争情报系统</h4>
+        <div class="btn-group">
+            <button class="btn btn-outline-secondary btn-sm" onclick="ciExportCSV()">
+                <i class="bi bi-download"></i> 导出CSV
+            </button>
+        </div>
+    </div>
+
+    <!-- Tab导航 -->
+    <ul class="nav nav-tabs mb-3" id="ciTabs">
+        <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#ci-dashboard">Dashboard</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-competitors">竞争店信息</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-pricing">价格体系</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-traffic">客流观察</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-segments">玩家画像</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-keyplayers">核心玩家</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-scores">服务评分</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-community">微信群生态</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-marketing">营销活动</a></li>
+        <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#ci-analysis">分析报告</a></li>
+    </ul>
+
+    <div class="tab-content">
+        <!-- ===== Dashboard ===== -->
+        <div class="tab-pane fade show active" id="ci-dashboard">
+            <div class="row g-3 mb-3" id="ciDashCards"></div>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>竞争评分排行</h6>
+                            <canvas id="ciScoreChart" height="200"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>服务评分雷达图</h6>
+                            <canvas id="ciRadarChart" height="200"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row g-3 mt-1">
+                <div class="col-md-7">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>最近客流趋势</h6>
+                            <canvas id="ciTrafficChart" height="120"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-5">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>最新价格对比</h6>
+                            <div id="ciPricingCompare" class="mt-2"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== 竞争店信息 ===== -->
+        <div class="tab-pane fade" id="ci-competitors">
+            <div class="d-flex justify-content-between mb-2">
+                <h6>竞争店基础信息库</h6>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('competitors')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('competitors')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditCompetitor()">+ 新增竞争店</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店名</th><th>状态</th><th>地址</th><th>开业</th><th>面积(㎡)</th>
+                        <th>桌数(4口/8口)</th><th>定位</th><th>目标客户</th>
+                        <th>已知优势</th><th>已知短板</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciCompetitorBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 价格体系 ===== -->
+        <div class="tab-pane fade" id="ci-pricing">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciPricingFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadPricing()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('pricing')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('pricing')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditPricing()">+ 新增价格记录</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>记录日期</th><th>普通时段</th><th>夜场</th>
+                        <th>通宵</th><th>包桌</th><th>会员价</th><th>新客优惠</th>
+                        <th>老客优惠</th><th>充值活动</th><th>比赛收费</th><th>饮品</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciPricingBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 客流观察 ===== -->
+        <div class="tab-pane fade" id="ci-traffic">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciTrafficFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadTraffic()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('traffic')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('traffic')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditTraffic()">+ 新增客流观察</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>日期</th><th>时间段</th><th>观察桌数</th>
+                        <th>活跃玩家</th><th>是否满桌</th><th>是否排队</th><th>活跃程度</th><th>备注</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciTrafficBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 玩家画像 ===== -->
+        <div class="tab-pane fade" id="ci-segments">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciSegFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadSegments()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('segments')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('segments')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditSegment()">+ 新增玩家画像</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>玩家类型</th><th>活跃时间</th><th>消费能力</th>
+                        <th>带人能力</th><th>估计人数</th><th>特征描述</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciSegBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 核心玩家 ===== -->
+        <div class="tab-pane fade" id="ci-keyplayers">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciKpFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadKeyPlayers()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('key_players')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('key_players')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditKeyPlayer()">+ 新增核心玩家</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>编号</th><th>活跃频率</th><th>常带人数</th>
+                        <th>技术水平</th><th>消费能力</th><th>社交影响力</th><th>转化价值</th><th>备注</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciKpBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 服务评分 ===== -->
+        <div class="tab-pane fade" id="ci-scores">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciScoreFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadServiceScores()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('service_scores')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('service_scores')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditServiceScore()">+ 新增评分</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>日期</th>
+                        {% for key, label in score_dimensions %}
+                        <th>{{ label }}</th>
+                        {% endfor %}
+                        <th>备注</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciScoreBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 微信群生态 ===== -->
+        <div class="tab-pane fade" id="ci-community">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciCommFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadCommunity()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('community')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('community')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditCommunity()">+ 新增群生态记录</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>记录日期</th><th>群规模</th><th>活跃人数</th>
+                        <th>每日消息</th><th>活动频率</th><th>新人机制</th><th>比赛组织</th>
+                        <th>管理员活跃度</th><th>群文化</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciCommBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 营销活动 ===== -->
+        <div class="tab-pane fade" id="ci-marketing">
+            <div class="d-flex justify-content-between mb-2">
+                <select id="ciMktFilter" class="form-select form-select-sm" style="width:auto" onchange="ciLoadMarketing()">
+                    <option value="">全部店铺</option>
+                </select>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciDownloadTemplate('marketing')"><i class="bi bi-file-earmark-arrow-down"></i> 模板</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="ciImportCSV('marketing')"><i class="bi bi-upload"></i> 导入</button>
+                    <button class="btn btn-primary btn-sm" onclick="ciEditMarketing()">+ 新增活动记录</button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead><tr>
+                        <th>店铺</th><th>日期</th><th>活动类型</th><th>内容</th>
+                        <th>推广方式</th><th>预计成本</th><th>效果观察</th><th>值得学习</th><th>操作</th>
+                    </tr></thead>
+                    <tbody id="ciMktBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ===== 分析报告 ===== -->
+        <div class="tab-pane fade" id="ci-analysis">
+            <div class="row g-3">
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>竞争评分模型 (总分100)</h6>
+                            <div id="ciScoreTable"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-body">
+                            <h6>SWOT分析</h6>
+                            <div id="ciSwotArea"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 通用弹窗 -->
+<div class="modal fade" id="ciModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="ciModalTitle">编辑</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="ciModalBody"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{% endblock %}

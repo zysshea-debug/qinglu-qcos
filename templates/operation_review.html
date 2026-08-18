@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}运营复盘 - 青鹭雀庄{% endblock %}
+{% block page_name %}operation_review{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-graph-up-arrow"></i> 运营复盘</h4>
+        <small class="text-muted">经营反馈闭环核心 · 让系统「会学习」</small>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        <input type="date" class="form-control form-control-sm" id="reviewDate" style="width:auto">
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadReview()"><i class="bi bi-arrow-clockwise"></i> 查看</button>
+        <button class="btn btn-outline-primary btn-sm" onclick="recompute()"><i class="bi bi-calculator"></i> 重算反馈</button>
+        <button class="btn btn-outline-success btn-sm" onclick="genTasks()"><i class="bi bi-magic"></i> 复盘任务</button>
+    </div>
+</div>
+
+<div id="statusBar"></div>
+
+<h6 class="mt-3 text-muted"><i class="bi bi-calendar-day"></i> 当日经营概览</h6>
+<div class="row g-2" id="overviewCards"></div>
+
+<div class="row g-3 mt-1">
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold"><i class="bi bi-trophy"></i> 优秀组合库（高评分常同组）</div>
+            <div class="card-body" id="bestBox" style="max-height:50vh;overflow:auto"></div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold text-danger"><i class="bi bi-exclamation-triangle"></i> 风险组合提醒（建议）</div>
+            <div class="card-body" id="riskBox" style="max-height:50vh;overflow:auto"></div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mt-1">
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold text-success"><i class="bi bi-person-plus"></i> 新增客户</div>
+            <div class="card-body" id="newBox"></div>
+        </div>
+    </div>
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold text-warning"><i class="bi bi-person-dash"></i> 流失客户</div>
+            <div class="card-body" id="churnBox" style="max-height:40vh;overflow:auto"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let D = null;
+
+function fmtMoney(n){ return '¥' + (Math.round((n||0)*100)/100).toLocaleString('zh-CN'); }
+function scoreColor(s){ return s>=4?'success':s>=3?'warning':'danger'; }
+
+function showStatus(msg, isErr){
+    const el = document.getElementById('statusBar');
+    el.innerHTML = `<div class="alert alert-${isErr?'danger':'success'} alert-dismissible fade show py-2" role="alert">
+        ${msg}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
+    if(!isErr) setTimeout(()=>{ el.innerHTML=''; }, 3500);
+}
+
+async function checkAuth(){
+    const r = await fetch('/api/auth/me'); const d = await r.json();
+    if(!d.authenticated){ window.location.href='/login'; return false; }
+    return true;
+}
+
+async function loadReview(){
+    if(!(await checkAuth())) return;
+    const dt = document.getElementById('reviewDate').value;
+    try{
+        const url = '/api/operation_review' + (dt?('?date='+dt):'');
+        const r = await fetch(url); D = await r.json();
+        renderOverview(); renderBest(); renderRisk(); renderNew(); renderChurn();
+    }catch(e){ showStatus('加载失败：' + e.message, true); }
+}
+
+async function recompute(){
+    try{
+        await fetch('/api/feedback/recompute', {method:'POST'});
+        showStatus('已重算玩家体验与组合统计');
+        await loadReview();
+    }catch(e){ showStatus('失败：' + e.message, true); }
+}
+
+async function genTasks(){
+    try{
+        const r = await fetch('/api/feedback/generate-review-tasks', {method:'POST'}); const d = await r.json();
+        showStatus('已生成复盘任务：' + (d.summary?.created||0) + ' 条');
+    }catch(e){ showStatus('失败：' + e.message, true); }
+}
+
+function renderOverview(){
+    const o = D;
+    const cards = [
+        {l:'日期', v:o.date, c:'text-dark'},
+        {l:'当日GMV', v:fmtMoney(o.gmv), c:'text-primary'},
+        {l:'桌数', v:o.sessions+' 桌', c:'text-dark'},
+        {l:'反馈桌数', v:o.feedback_count+' 桌', c:'text-dark'},
+        {l:'平均桌局质量', v:o.average_table_score+' / 5', c:'text-'+scoreColor(o.average_table_score)},
+        {l:'冲突桌数', v:o.conflict_tables+' 桌', c:o.conflict_tables>0?'text-danger':'text-success'},
+        {l:'新增客户', v:o.new_customer_count+' 人', c:'text-success'},
+        {l:'流失客户', v:o.churned_count+' 人', c:'text-warning'},
+        {l:'任务完成率', v:o.task_completion_rate+'%', c:'text-info'},
+    ];
+    document.getElementById('overviewCards').innerHTML = cards.map(c=>
+        `<div class="col-6 col-md-4 col-lg-3"><div class="card border-0 bg-light h-100"><div class="card-body py-2">
+            <div class="small text-muted">${c.l}</div><div class="fs-5 fw-bold ${c.c}">${c.v}</div></div></div></div>`
+    ).join('');
+}
+
+function renderBest(){
+    const box = document.getElementById('bestBox');
+    const list = D.best_combinations||[];
+    if(!list.length){ box.innerHTML='<div class="text-muted">暂无高评分组合记录（先去填写桌局反馈）。</div>'; return; }
+    box.innerHTML = list.map(c=>{
+        const rec = c.recommend==='high'?'success':c.recommend==='medium'?'warning':'secondary';
+        return `<div class="border rounded p-2 mb-2">
+            <div class="d-flex justify-content-between">
+                <span class="fw-semibold">${c.player_names.join(' + ')}</span>
+                <span class="badge bg-${rec}">推荐 ${c.recommend==='high'?'高':c.recommend==='medium'?'中':'低'}</span>
+            </div>
+            <div class="small text-muted">历史 ${c.play_count} 次 · 平均评分 <b>${c.average_score}</b> / 5</div>
+        </div>`;
+    }).join('');
+}
+
+function renderRisk(){
+    const box = document.getElementById('riskBox');
+    const list = D.risk_combinations||[];
+    if(!list.length){ box.innerHTML='<div class="text-muted">暂无风险组合 🎉 当前同桌关系健康。</div>'; return; }
+    box.innerHTML = list.map(c=>`
+        <div class="border border-danger rounded p-2 mb-2">
+            <div class="fw-semibold">${c.player_a_name} <i class="bi bi-x-circle text-danger"></i> ${c.player_b_name}</div>
+            <div class="small text-muted">${c.reason} · 趋势：${c.trend_label||'—'}</div>
+            <div class="small text-danger">${c.suggestion}</div>
+            <div class="mt-1">
+                <button class="btn btn-sm btn-outline-danger" onclick="confirmAvoid(${c.player_a_id},${c.player_b_id})">人工确认避免同桌</button>
+            </div>
+        </div>`).join('');
+}
+
+async function confirmAvoid(a,b){
+    try{
+        const r = await fetch(`/api/players/${a}/relationships`, {method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({other_id:b, relationship_type:'avoid', relationship_score:-100, note:'复盘风险组合自动建议'})});
+        const d = await r.json();
+        if(d.status==='ok') showStatus('已将避免关系写入（人工确认）');
+        else showStatus('写入失败：'+(d.error||''), true);
+    }catch(e){ showStatus('失败：'+e.message, true); }
+}
+
+function renderNew(){
+    const box = document.getElementById('newBox');
+    const list = D.new_customers||[];
+    if(!list.length){ box.innerHTML='<div class="text-muted">当日无新增客户。</div>'; return; }
+    box.innerHTML = list.map(p=>`<span class="badge bg-success me-1 mb-1">${p.name}</span>`).join('');
+}
+
+function renderChurn(){
+    const box = document.getElementById('churnBox');
+    const list = D.churned_customers||[];
+    if(!list.length){ box.innerHTML='<div class="text-muted">当日无流失客户。</div>'; return; }
+    box.innerHTML = list.map(p=>`<div class="border-bottom py-1 small">${p.name} <span class="text-muted">(${p.customer_level||''})</span></div>`).join('');
+}
+
+loadReview();
+</script>
+{% endblock %}

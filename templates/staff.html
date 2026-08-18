@@ -1,0 +1,350 @@
+{% extends 'base.html' %}
+{% block title %}场务管理 - 青鹭收银{% endblock %}
+{% block page_name %}staff_mgmt{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-people-fill"></i> 场务管理</h4>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" onclick="loadDashboard()">
+            <i class="bi bi-graph-up"></i> 刷新看板
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="showAddStaffModal()">
+            <i class="bi bi-person-plus"></i> 新增场务
+        </button>
+    </div>
+</div>
+
+<!-- 看板统计 -->
+<div id="dashboardSection" class="mb-4">
+    <div class="row g-3 mb-3">
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="label">在职场务</div>
+                <div class="value" id="statStaffCount">-</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="label">本月结算笔数</div>
+                <div class="value" id="statMonthCount">-</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="label">本月发放总额</div>
+                <div class="value income" id="statMonthTotal">-</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="label">待发放金额</div>
+                <div class="value fee" id="statPendingTotal">-</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tab 切换 -->
+<ul class="nav nav-tabs mb-3" id="staffTabs">
+    <li class="nav-item">
+        <button class="nav-link active" data-tab="staff" onclick="switchTab('staff')">
+            <i class="bi bi-person-badge"></i> 场务列表
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-tab="incentive" onclick="switchTab('incentive')">
+            <i class="bi bi-trophy"></i> 激励奖金档位
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link" data-tab="settlements" onclick="switchTab('settlements')">
+            <i class="bi bi-cash-coin"></i> 结算记录
+        </button>
+    </li>
+</ul>
+
+<!-- 场务列表 -->
+<div id="tab-staff" class="tab-content">
+    <div class="card">
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover" id="staffTable">
+                    <thead>
+                        <tr>
+                            <th>姓名</th>
+                            <th>类型</th>
+                            <th>提成比例</th>
+                            <th>状态</th>
+                            <th>入职日期</th>
+                            <th>累计已发</th>
+                            <th>待发放</th>
+                            <th>备注</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="staffTableBody">
+                        <tr><td colspan="9" class="text-center text-muted py-4">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 激励奖金档位 -->
+<div id="tab-incentive" class="tab-content" style="display:none">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>激励奖金档位</span>
+            <button class="btn btn-primary btn-sm" onclick="showAddIncentiveModal()">
+                <i class="bi bi-plus-circle"></i> 新增档位
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> 根据结算周期内的总金额自动匹配档位，发放激励奖金。金额区间为左闭右开 [min, max)。
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover" id="incentiveTable">
+                    <thead>
+                        <tr>
+                            <th>排序</th>
+                            <th>最低金额(¥)</th>
+                            <th>最高金额(¥)</th>
+                            <th>激励奖金(¥)</th>
+                            <th>说明</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="incentiveTableBody">
+                        <tr><td colspan="7" class="text-center text-muted py-4">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 结算记录 -->
+<div id="tab-settlements" class="tab-content" style="display:none">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>结算记录</span>
+            <div class="d-flex gap-2 align-items-center">
+                <select class="form-select form-select-sm" id="settlementStaffFilter" style="width:auto" onchange="loadSettlements()">
+                    <option value="">全部场务</option>
+                </select>
+                <select class="form-select form-select-sm" id="settlementStatusFilter" style="width:auto" onchange="loadSettlements()">
+                    <option value="">全部状态</option>
+                    <option value="pending">待发放</option>
+                    <option value="paid">已发放</option>
+                </select>
+                <button class="btn btn-primary btn-sm" onclick="showAddSettlementModal()">
+                    <i class="bi bi-plus-circle"></i> 新增结算
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover" id="settlementTable">
+                    <thead>
+                        <tr>
+                            <th>结算日期</th>
+                            <th>场务</th>
+                            <th>类型</th>
+                            <th>周期</th>
+                            <th>总金额(GMV)</th>
+                            <th>提成比例</th>
+                            <th>提成金额</th>
+                            <th>激励奖金</th>
+                            <th>应付合计</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="settlementTableBody">
+                        <tr><td colspan="11" class="text-center text-muted py-4">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 新增/编辑场务弹窗 -->
+<div class="modal fade" id="staffModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="staffModalTitle">新增场务</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="staffEditId">
+                <div class="mb-3 position-relative">
+                    <label class="form-label">姓名 <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control" id="staffName" placeholder="输入姓名" oninput="searchPlayersForStaff(this.value)">
+                    <div id="staffAutocomplete" class="autocomplete-list" style="display:none"></div>
+                    <input type="hidden" id="staffPlayerId">
+                    <small class="text-muted">输入姓名自动关联玩家档案</small>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">场务类型</label>
+                        <select class="form-select" id="staffType">
+                            {% for key, label in staff_types.items() %}
+                            <option value="{{ key }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">状态</label>
+                        <select class="form-select" id="staffStatus">
+                            {% for key, label in staff_status.items() %}
+                            <option value="{{ key }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">提成比例</label>
+                        <div class="input-group">
+                            <input type="number" class="form-control" id="staffCommission" step="0.01" min="0" max="1" placeholder="如 0.1">
+                            <span class="input-group-text" id="commissionPercent">10%</span>
+                        </div>
+                        <small class="text-muted">0.1 = 10%</small>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">入职日期</label>
+                        <input type="date" class="form-control" id="staffJoinedDate">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <textarea class="form-control" id="staffNotes" rows="2"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveStaff()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 新增/编辑激励档位弹窗 -->
+<div class="modal fade" id="incentiveModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="incentiveModalTitle">新增激励档位</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="incentiveEditId">
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">最低金额(¥) <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="incentiveMin" step="100" min="0" placeholder="如 500">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">最高金额(¥)</label>
+                        <input type="number" class="form-control" id="incentiveMax" step="100" min="0" placeholder="留空=无上限">
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">激励奖金(¥) <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="incentiveBonus" step="10" min="0" placeholder="如 50">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">排序</label>
+                        <input type="number" class="form-control" id="incentiveSort" min="0" value="0">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">说明</label>
+                    <input type="text" class="form-control" id="incentiveDesc" placeholder="如：周GMV满500奖励">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveIncentive()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 新增结算弹窗 -->
+<div class="modal fade" id="settlementModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">新增结算</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">场务 <span class="text-danger">*</span></label>
+                        <select class="form-select" id="settlementStaff" onchange="onSettlementStaffChange()">
+                            <option value="">请选择</option>
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">结算日期</label>
+                        <input type="date" class="form-control" id="settlementDate">
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">周期开始</label>
+                        <input type="date" class="form-control" id="settlementPeriodStart">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">周期结束</label>
+                        <input type="date" class="form-control" id="settlementPeriodEnd">
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">总金额(GMV) <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="settlementGMV" step="0.01" min="0" placeholder="结算周期内产生的总金额" oninput="previewSettlement()">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">提成比例</label>
+                        <div class="input-group">
+                            <input type="number" class="form-control" id="settlementCommissionRate" step="0.01" min="0" max="1" oninput="previewSettlement()">
+                            <span class="input-group-text" id="settlementCommissionPercent">10%</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-6">
+                        <label class="form-label">激励奖金(¥)</label>
+                        <input type="number" class="form-control" id="settlementIncentive" step="10" min="0" value="0" oninput="previewSettlement()">
+                        <small class="text-muted" id="incentiveHint">输入GMV后自动匹配档位</small>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">应付合计</label>
+                        <div class="final-amount">
+                            <span class="amount" id="settlementTotalPreview">¥0.00</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <textarea class="form-control" id="settlementNote" rows="2"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveSettlement()">确认结算</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

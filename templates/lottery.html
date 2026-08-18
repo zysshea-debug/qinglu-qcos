@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}抽奖管理 - 青鹭收银{% endblock %}
+{% block page_name %}lottery{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-gift"></i> 抽奖管理</h4>
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label mb-0 text-muted">日期</label>
+        <input type="date" class="form-control form-control-sm" id="lotteryDate" style="width:160px">
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-5">
+        <div class="card">
+            <div class="card-header">添加抽奖名额</div>
+            <div class="card-body">
+                <form id="discountForm">
+                    <div class="mb-3">
+                        <label class="form-label">抽奖日期</label>
+                        <input type="date" class="form-control" id="lotteryDateInput" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">玩家姓名</label>
+                        <input type="text" class="form-control" id="playerNameInput" placeholder="输入玩家姓名" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">抽奖类型</label>
+                        <select class="form-select" id="discountTypeInput">
+                            <option value="free">免单（最高抵扣¥100）</option>
+                            <option value="half">半价（最高抵扣¥50）</option>
+                            <option value="discount">八折（最高抵扣¥50）</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-plus-circle"></i> 添加</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-7">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>今日抽奖名单</span>
+                <span class="text-muted small">每天：1免单 + 2半价 + 12八折</span>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-hover mb-0">
+                    <thead>
+                        <tr><th>玩家</th><th>类型</th><th>抵扣上限</th><th>状态</th><th>操作</th></tr>
+                    </thead>
+                    <tbody id="discountList"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

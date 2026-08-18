@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}用户管理 - 青鹭收银{% endblock %}
+{% block page_name %}users{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-person-gear"></i> 用户管理</h4>
+    <button class="btn btn-outline-primary btn-sm" onclick="openUserModal()">
+        <i class="bi bi-plus-circle"></i> 添加用户
+    </button>
+</div>
+
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr><th>用户名</th><th>姓名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr>
+            </thead>
+            <tbody id="userList"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 用户编辑弹窗 -->
+<div class="modal fade" id="userModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="userModalTitle">添加用户</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="userId">
+                <div class="mb-3">
+                    <label class="form-label">用户名 *</label>
+                    <input type="text" class="form-control" id="userUsername" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">姓名 *</label>
+                    <input type="text" class="form-control" id="userName" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">密码 <small class="text-muted" id="passwordHint"></small></label>
+                    <input type="password" class="form-control" id="userPassword">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">角色</label>
+                    <select class="form-select" id="userRole">
+                        <option value="admin">管理员 (全部权限)</option>
+                        <option value="staff">店员 (收银+商品+会员)</option>
+                        <option value="viewer">只读 (只能查看)</option>
+                    </select>
+                </div>
+                <div class="form-check">
+                    <input type="checkbox" class="form-check-input" id="userActive" checked>
+                    <label class="form-check-label">启用</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveUser()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

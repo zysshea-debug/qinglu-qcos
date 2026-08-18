@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}日结报表 - 青鹭收银{% endblock %}
+{% block page_name %}daily{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-receipt"></i> 日结报表</h4>
+    <div class="d-flex align-items-center gap-2">
+        <label class="form-label mb-0 text-muted">日期</label>
+        <input type="date" class="form-control form-control-sm" id="dailyDate" style="width:160px">
+        <a href="#" class="btn btn-outline-primary btn-sm" id="exportBtn">
+            <i class="bi bi-download"></i> 导出CSV
+        </a>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">已结桌数</div>
+            <div class="value" id="totalSessions">0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">台费收入</div>
+            <div class="value fee" id="totalFee">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">商品收入</div>
+            <div class="value" style="color:var(--warning)" id="productRevenue">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">抵扣合计</div>
+            <div class="value" style="color:var(--muted)" id="totalDiscount">¥0</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">实收总额</div>
+            <div class="value income" id="totalRevenue">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">总营业额</div>
+            <div class="value income" id="grandTotal" style="font-size:20px">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">会员充值</div>
+            <div class="value" style="font-size:20px;color:#7c3aed" id="rechargeTotal">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">历史组局实收 <small class="fw-normal text-muted">(Excel导入)</small></div>
+            <div class="value" style="font-size:20px;color:#16a34a" id="historicalPayment">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">进行中</div>
+            <div class="value" id="activeSessions">0</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-qr-code-scan text-success"></i> 微信扫码</div>
+            <div class="value" style="font-size:18px" id="scan_wechatAmount">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-qr-code-scan text-primary"></i> 支付宝扫码</div>
+            <div class="value" style="font-size:18px" id="scan_alipayAmount">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-wechat text-success"></i> 微信</div>
+            <div class="value" style="font-size:18px" id="wechatAmount">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-credit-card text-primary"></i> 支付宝</div>
+            <div class="value" style="font-size:18px" id="alipayAmount">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-cash text-warning"></i> 现金</div>
+            <div class="value" style="font-size:18px" id="cashAmount">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label"><i class="bi bi-credit-card-2-front" style="color:#7c3aed"></i> 会员</div>
+            <div class="value" style="font-size:18px" id="memberAmount">¥0</div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">台桌明细</div>
+    <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr><th>开始</th><th>桌号</th><th>机型</th><th>时长</th><th>台费</th><th>商品</th><th>抵扣</th><th>实收</th><th>支付</th></tr>
+            </thead>
+            <tbody id="dailySessions"></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('exportBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    const date = document.getElementById('dailyDate').value;
+    window.location.href = `/api/export/csv?start_date=${date}`;
+});
+</script>
+{% endblock %}

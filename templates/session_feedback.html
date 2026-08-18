@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}桌局反馈 - 青鹭雀庄{% endblock %}
+{% block page_name %}session_feedback{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-chat-square-heart"></i> 桌局反馈</h4>
+        <small class="text-muted">牌局结束后填写 · 数据回流驱动更精准组局</small>
+    </div>
+    <div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadSessions()"><i class="bi bi-arrow-clockwise"></i> 刷新列表</button>
+        <button class="btn btn-outline-primary btn-sm" onclick="loadHistory()"><i class="bi bi-clock-history"></i> 历史反馈</button>
+    </div>
+</div>
+
+<div id="statusBar"></div>
+
+<div class="row g-3 mt-1">
+    <div class="col-lg-5">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold"><i class="bi bi-list"></i> 选择牌局（近14天）</div>
+            <div class="card-body" style="max-height:62vh;overflow:auto" id="sessionList">
+                <div class="text-muted">加载中…</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-light fw-semibold"><i class="bi bi-pencil-square"></i> 反馈填写</div>
+            <div class="card-body" id="feedbackForm">
+                <div class="text-muted">请先在左侧选择一个牌局。</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm mt-3">
+    <div class="card-header bg-light fw-semibold"><i class="bi bi-clock-history"></i> 历史反馈记录</div>
+    <div class="card-body" id="historyList" style="max-height:40vh;overflow:auto"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let SESSIONS = [], CURRENT = null;
+
+function showStatus(msg, isErr){
+    const el = document.getElementById('statusBar');
+    el.innerHTML = `<div class="alert alert-${isErr?'danger':'success'} alert-dismissible fade show py-2" role="alert">
+        ${msg}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
+    if(!isErr) setTimeout(()=>{ el.innerHTML=''; }, 3500);
+}
+
+async function checkAuth(){
+    const r = await fetch('/api/auth/me'); const d = await r.json();
+    if(!d.authenticated){ window.location.href='/login'; return false; }
+    return true;
+}
+
+async function loadSessions(){
+    if(!(await checkAuth())) return;
+    try{
+        const r = await fetch('/api/sessions/list'); const d = await r.json();
+        SESSIONS = d.sessions || [];
+        renderSessions();
+    }catch(e){ showStatus('加载失败：' + e.message, true); }
+}
+
+function renderSessions(){
+    const box = document.getElementById('sessionList');
+    if(!SESSIONS.length){ box.innerHTML = '<div class="text-muted">近14天暂无牌局。</div>'; return; }
+    box.innerHTML = SESSIONS.map(s=>{
+        const when = (s.start_time||'').replace('T',' ').slice(0,16);
+        const badge = s.has_feedback ? '<span class="badge bg-success">已反馈</span>' : '<span class="badge bg-secondary">未反馈</span>';
+        const players = (s.players||[]).join('、') || '—';
+        return `<div class="border rounded p-2 mb-2 ${CURRENT===s.id?'border-primary':''}" style="cursor:pointer" onclick="selectSession(${s.id})">
+            <div class="d-flex justify-content-between"><small class="text-muted">#${s.id} · ${s.machine_name||''}</small>${badge}</div>
+            <div class="small fw-semibold">${when}</div>
+            <div class="small text-muted">玩家(${s.player_count})：${players}</div>
+        </div>`;
+    }).join('');
+}
+
+function selectSession(id){
+    CURRENT = id;
+    renderSessions();
+    renderForm();
+}
+
+function renderForm(){
+    const box = document.getElementById('feedbackForm');
+    if(CURRENT==null){ box.innerHTML = '<div class="text-muted">请先在左侧选择一个牌局。</div>'; return; }
+    const s = SESSIONS.find(x=>x.id===CURRENT);
+    const players = s ? (s.players||[]).join('、') : '';
+    box.innerHTML = `
+        <div class="mb-2"><span class="text-muted">牌局 #${CURRENT}</span> · 玩家：${players||'—'}</div>
+        ${rateRow('atmosphere_score','桌面氛围','氛围轻松愉快')}
+        ${rateRow('compatibility_score','玩家匹配','牌友间默契合拍')}
+        ${rateRow('table_quality_score','整体质量','整体体验满意')}
+        ${rateRow('conflict_level','冲突程度','越高表示越不愉快')}
+        <div class="mb-3">
+            <label class="form-label">冲突主因</label>
+            <select class="form-select" id="conflict_type">
+                <option value="none">无冲突</option>
+                <option value="skill_gap">技术差距</option>
+                <option value="personality">性格不合</option>
+                <option value="money_pressure">输赢压力</option>
+                <option value="other">其他</option>
+            </select>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">备注</label>
+            <textarea class="form-control" id="notes" rows="2" placeholder="例如：不喜欢竞技水平差距太大的局"></textarea>
+        </div>
+        <button class="btn btn-primary w-100" onclick="submitFeedback()"><i class="bi bi-send"></i> 提交反馈（数据回流）</button>
+    `;
+    ['atmosphere_score','compatibility_score','table_quality_score','conflict_level'].forEach(bindRate);
+}
+
+function rateRow(id, label, hint){
+    return `<div class="mb-3">
+        <label class="form-label d-flex justify-content-between">
+            <span>${label} <small class="text-muted">${hint}</small></span>
+            <span class="badge bg-primary" id="${id}_val">3</span>
+        </label>
+        <input type="range" class="form-range" min="1" max="5" step="1" value="3" id="${id}">
+    </div>`;
+}
+function bindRate(id){
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.addEventListener('input', ()=>{ document.getElementById(id+'_val').textContent = el.value; });
+}
+
+async function submitFeedback(){
+    if(CURRENT==null){ showStatus('请先选择牌局', true); return; }
+    const payload = {
+        session_id: CURRENT,
+        atmosphere_score: +document.getElementById('atmosphere_score').value,
+        compatibility_score: +document.getElementById('compatibility_score').value,
+        table_quality_score: +document.getElementById('table_quality_score').value,
+        conflict_level: +document.getElementById('conflict_level').value,
+        conflict_type: document.getElementById('conflict_type').value,
+        notes: document.getElementById('notes').value,
+    };
+    try{
+        const r = await fetch('/api/session_feedback/submit', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        const d = await r.json();
+        if(d.status==='ok'){
+            showStatus('反馈已保存，玩家体验与组合统计已回流 ✅');
+            await loadSessions(); await loadHistory();
+        } else {
+            showStatus('提交失败：' + (d.error||'未知错误'), true);
+        }
+    }catch(e){ showStatus('提交失败：' + e.message, true); }
+}
+
+async function loadHistory(){
+    if(!(await checkAuth())) return;
+    try{
+        const r = await fetch('/api/session_feedback/list?limit=30'); const d = await r.json();
+        const box = document.getElementById('historyList');
+        const rows = d.feedback||[];
+        if(!rows.length){ box.innerHTML = '<div class="text-muted">暂无反馈记录。</div>'; return; }
+        box.innerHTML = rows.map(f=>{
+            const when = (f.start_time||'').replace('T',' ').slice(0,16);
+            const avg = ((f.atmosphere_score+f.compatibility_score+f.table_quality_score)/3).toFixed(1);
+            return `<div class="border-bottom py-2">
+                <div class="d-flex justify-content-between">
+                    <small class="text-muted">牌局 #${f.session_id} · ${when} · ${f.operator||''}</small>
+                    <span class="badge bg-info">均分 ${avg}</span>
+                </div>
+                <div class="small">玩家：${f.player_names||'—'} ${f.conflict_type&&f.conflict_type!=='none'?'· <span class="text-danger">冲突:'+f.conflict_type+'</span>':''}</div>
+                ${f.notes?`<div class="small text-muted">备注：${f.notes}</div>`:''}
+            </div>`;
+        }).join('');
+    }catch(e){ showStatus('加载失败：' + e.message, true); }
+}
+
+loadSessions();
+loadHistory();
+</script>
+{% endblock %}

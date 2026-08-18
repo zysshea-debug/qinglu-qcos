@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% block title %}台桌总览 - 青鹭收银{% endblock %}
+{% block page_name %}dashboard{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-speedometer2"></i> 台桌总览</h4>
+    <small class="text-muted" id="currentTime"></small>
+</div>
+<div class="machine-grid" id="machineGrid"></div>
+
+<!-- 开台弹窗 -->
+<div class="modal fade" id="startModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">开台 - <span id="startMachineName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label fw-bold mb-2">玩家信息</label>
+                <div class="row g-2 mb-3">
+                    <div class="col-12">
+                        <label class="form-label small text-muted">开台时间（默认当前时间）</label>
+                        <input type="datetime-local" class="form-control form-control-sm" id="startSessionTime">
+                    </div>
+                </div>
+                <div id="playerInputs"></div>
+                <button class="btn btn-outline-primary btn-sm mt-2" onclick="addPlayerRow()">
+                    <i class="bi bi-plus"></i> 添加玩家
+                </button>
+                <div class="form-text mt-2">输入名字会自动匹配玩家库。选"组织者"标记本桌发起人，默认第一个玩家为组织者。每人独立计时、独立结账。<br>凌晨00:00-08:00时段，勾选"通宵"按包夜价计费；不勾选则按正常小时费率计费。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmStartSession()">
+                    <i class="bi bi-check-circle"></i> 确认开台
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 单人结账弹窗 -->
+<div class="modal fade" id="checkoutModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title">单人结账 - <span id="checkoutPlayerName"></span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3 align-items-end">
+                    <div class="col-3">
+                        <small class="text-muted d-block">台桌</small>
+                        <span class="fw-bold" id="checkoutMachineName"></span>
+                    </div>
+                    <div class="col-5">
+                        <small class="text-muted d-block">开始时间 <span class="text-primary">(可修改)</span></small>
+                        <div class="input-group input-group-sm">
+                            <input type="datetime-local" class="form-control" id="checkoutStartTimeInput">
+                            <button class="btn btn-outline-primary" type="button" id="btnApplyStartTime" onclick="applyCheckoutStartTime()">应用</button>
+                        </div>
+                        <small id="startTimeApplyStatus" class="text-muted"></small>
+                    </div>
+                    <div class="col-3">
+                        <small class="text-muted d-block">时长</small>
+                        <span class="fw-bold" id="checkoutDuration"></span>
+                    </div>
+                    <div class="col-2">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="checkoutOvernight" onchange="onCheckoutOvernightChange()">
+                            <label class="form-check-label" for="checkoutOvernight">通宵</label>
+                        </div>
+                    </div>
+                </div>
+
+                <label class="form-label fw-bold">费用明细</label>
+                <div class="row">
+                    <div class="col-12 text-end mb-1">
+                        <small class="text-muted">当前台费</small>
+                        <span class="fee-highlight ms-2" id="checkoutFee"></span>
+                    </div>
+                </div>
+                <table class="table table-sm" id="feeBreakdownTable"></table>
+                <div id="billingExplanation" class="alert alert-light border mt-2 mb-0 py-2 small" style="display:none;"></div>
+
+                <label class="form-label fw-bold mt-3">台费折扣</label>
+                <div class="row g-2 mb-2 align-items-end">
+                    <div class="col-4">
+                        <select class="form-select form-select-sm" id="manualDiscountType" onchange="onManualDiscountChange()">
+                            <option value="">无折扣</option>
+                            <option value="amount">金额减免</option>
+                            <option value="percent">折扣比例</option>
+                        </select>
+                    </div>
+                    <div class="col-4">
+                        <div class="input-group input-group-sm">
+                            <input type="number" class="form-control" id="manualDiscountValue" placeholder="0" min="0" step="0.01" oninput="onManualDiscountChange()">
+                            <span class="input-group-text" id="manualDiscountUnit">元</span>
+                        </div>
+                    </div>
+                    <div class="col-4 text-end">
+                        <small class="text-muted">减免</small>
+                        <span class="fw-bold text-danger" id="manualDiscountAmount">-¥0.00</span>
+                    </div>
+                </div>
+                <div class="form-text mb-2">手动折扣先作用于台费，抽奖抵扣在手动折扣后的金额上再计算。</div>
+
+                <label class="form-label fw-bold mt-3">商品消费</label>
+                <div class="d-flex gap-2 mb-2">
+                    <select class="form-select form-select-sm" id="productSelect" style="flex:1">
+                        <option value="">选择商品...</option>
+                    </select>
+                    <input type="number" class="form-control form-control-sm" id="productQty" value="1" min="1" style="width:70px">
+                    <button class="btn btn-sm btn-outline-primary" onclick="addProductToCart()"><i class="bi bi-plus"></i></button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="openCustomProductModal()"><i class="bi bi-pencil-square"></i> 无码</button>
+                </div>
+                <div id="cartList"></div>
+                <div class="text-end mt-1" id="cartTotal"></div>
+
+                <label class="form-label fw-bold mt-3">抽奖抵扣</label>
+                <input type="text" class="form-control mb-2" id="discountSearch" placeholder="输入玩家姓名搜索可用优惠券..." oninput="searchDiscounts()">
+                <div id="discountResults"></div>
+                <div id="selectedDiscount"></div>
+
+                <label class="form-label fw-bold mt-3">支付方式</label>
+                <div class="btn-group w-100 mb-3 flex-wrap" role="group">
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payScanWechat" value="scan_wechat" checked>
+                    <label class="btn btn-outline-primary" for="payScanWechat"><i class="bi bi-qr-code-scan"></i> 微信扫码</label>
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payScanAlipay" value="scan_alipay">
+                    <label class="btn btn-outline-primary" for="payScanAlipay"><i class="bi bi-qr-code-scan"></i> 支付宝扫码</label>
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payWechat" value="wechat">
+                    <label class="btn btn-outline-primary" for="payWechat">微信</label>
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payAlipay" value="alipay">
+                    <label class="btn btn-outline-primary" for="payAlipay">支付宝</label>
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payCash" value="cash">
+                    <label class="btn btn-outline-primary" for="payCash">现金</label>
+                    <input type="radio" class="btn-check" name="paymentMethod" id="payMember" value="member">
+                    <label class="btn btn-outline-primary" for="payMember">会员余额</label>
+                </div>
+
+                <!-- 扫码确认区 -->
+                <div id="scanConfirmArea" class="alert alert-warning mb-3">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-qr-code-scan fs-4"></i>
+                        <div>
+                            <strong>扫码收款模式</strong><br>
+                            <small class="text-muted">请让顾客出示付款码，对准扫码盒扫描。听到语音播报后点击「确认结账」</small>
+                        </div>
+                    </div>
+                    <input type="text" id="scanInput" class="form-control form-control-lg text-center"
+                           placeholder="等待扫码..." autocomplete="off" style="font-size:20px;letter-spacing:3px;background:#fff8e1;">
+                    <div id="scanStatus" class="text-center mt-2"></div>
+                </div>
+
+                <div id="memberPayInfo" class="d-none alert alert-info"></div>
+
+                <div class="final-amount">
+                    <div>
+                        <span class="fs-5">应收金额</span>
+                        <small class="text-muted d-block" id="amountDetail"></small>
+                    </div>
+                    <span class="amount" id="checkoutFinalAmount">¥0</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger btn-lg" onclick="confirmPlayerCheckout()">
+                    <i class="bi bi-check-circle"></i> 确认结账
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 加人弹窗 -->
+<div class="modal fade" id="addPlayerModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">加人 - <span id="addPlayerMachine"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div style="position:relative">
+                    <input type="text" class="form-control" id="addPlayerName" placeholder="玩家姓名" oninput="onPlayerNameInput(this)" style="font-size:18px">
+                    <div class="autocomplete-list d-none" id="addPlayerAutocomplete"></div>
+                </div>
+                <div class="row g-2 mt-3">
+                    <div class="col-7">
+                        <label class="form-label small text-muted">开始时间</label>
+                        <input type="datetime-local" class="form-control form-control-sm" id="addPlayerStartTime">
+                    </div>
+                    <div class="col-5 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="addPlayerOvernight">
+                            <label class="form-check-label" for="addPlayerOvernight">通宵</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-text mt-2">新加入的玩家从设定时间开始独立计时；凌晨时段勾选"通宵"按包夜价计费。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmAddPlayer()">
+                    <i class="bi bi-person-plus"></i> 确认加入
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 快捷卖商品弹窗 -->
+<div class="modal fade" id="quickSellModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">快捷卖商品</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">商品</label>
+                    <select class="form-select" id="quickProductSelect"></select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">数量</label>
+                    <input type="number" class="form-control" id="quickProductQty" value="1" min="1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">支付方式</label>
+                    <div class="btn-group w-100" role="group">
+                        <input type="radio" class="btn-check" name="quickPay" id="qpWechat" value="wechat" checked>
+                        <label class="btn btn-outline-primary" for="qpWechat">微信</label>
+                        <input type="radio" class="btn-check" name="quickPay" id="qpAlipay" value="alipay">
+                        <label class="btn btn-outline-primary" for="qpAlipay">支付宝</label>
+                        <input type="radio" class="btn-check" name="quickPay" id="qpCash" value="cash">
+                        <label class="btn btn-outline-primary" for="qpCash">现金</label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmQuickSell()">确认出售</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 无码商品弹窗 -->
+<div class="modal fade" id="customProductModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">无码商品</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">商品名称</label>
+                    <input type="text" class="form-control" id="customProductName" placeholder="如烟/槟榔/零食等">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">品类</label>
+                    <select class="form-select" id="customProductCategory">
+                        <option value="drink">饮料</option>
+                        <option value="snack">零食</option>
+                        <option value="cigarette">烟</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">单价</label>
+                    <input type="number" class="form-control" id="customProductPrice" placeholder="0.00" min="0" step="0.1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">数量</label>
+                    <input type="number" class="form-control" id="customProductQty" value="1" min="1">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="addCustomProductToCart()">加入购物车</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('currentTime').textContent = new Date().toLocaleString('zh-CN');
+fetch('/api/auth/me').then(r => r.json()).then(d => {
+    if (!d.authenticated) window.location.href = '/login';
+});
+</script>
+{% endblock %}

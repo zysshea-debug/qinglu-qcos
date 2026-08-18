@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}智能组局 - 青鹭收银{% endblock %}
+{% block page_name %}table_matcher{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-people-fill"></i> 智能组局匹配</h4>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-outline-secondary btn-sm" onclick="recompute()">
+            <i class="bi bi-arrow-clockwise"></i> 重算评分(主动性+局型)
+        </button>
+    </div>
+</div>
+
+<div class="alert alert-info py-2" id="statusBar" style="display:none"></div>
+
+<div class="row g-3">
+    <!-- 左侧：输入条件 -->
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-sliders"></i> 组局条件</div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">局型</label>
+                    <select class="form-select" id="inputStyle">
+                        <option value="competitive">竞技局</option>
+                        <option value="entertainment">娱乐局</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">局注（备注用）</label>
+                    <select class="form-select" id="inputStake">
+                        <option value="">不指定</option>
+                        <option value="K5">K5</option>
+                        <option value="K10">K10</option>
+                        <option value="K20">K20</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">已有玩家（点击右侧结果加入）</label>
+                    <div id="existingChips" class="d-flex flex-wrap gap-1 mb-2"></div>
+                    <input type="text" class="form-control form-control-sm" id="playerSearchInput"
+                           placeholder="搜索玩家姓名，如：阿伟" oninput="searchPlayers(this.value)" autocomplete="off">
+                    <div id="playerSearchResults" class="list-group mt-1" style="display:none"></div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">还差几人</label>
+                    <input type="number" class="form-control" id="inputMissing" value="1" min="1" max="8">
+                </div>
+                <div class="d-grid gap-2">
+                    <button class="btn btn-primary" onclick="runMatch()">
+                        <i class="bi bi-lightning"></i> 智能匹配
+                    </button>
+                    <button class="btn btn-success" onclick="generateTasks()">
+                        <i class="bi bi-bell"></i> 生成联系任务（推荐前N人）
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧：结果 -->
+    <div class="col-lg-8">
+        <div class="card mb-3">
+            <div class="card-header"><i class="bi bi-check2-circle text-success"></i> 推荐候选
+                <span class="badge bg-success ms-1" id="recCount">0</span></div>
+            <div class="card-body" id="recommendedList">
+                <p class="text-muted">设置条件后点击「智能匹配」。</p>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header"><i class="bi bi-x-circle text-danger"></i> 不推荐名单
+                <span class="badge bg-danger ms-1" id="noRecCount">0</span></div>
+            <div class="card-body" id="notRecommendedList">
+                <p class="text-muted">系统会强制排除存在 avoid 关系或局型冲突的玩家。</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let existingPlayers = [];  // {id, name}
+
+function showStatus(msg, isError){
+    const bar = document.getElementById('statusBar');
+    bar.style.display = 'block';
+    bar.className = 'alert py-2 ' + (isError ? 'alert-danger' : 'alert-success');
+    bar.textContent = msg;
+    if (!isError) setTimeout(()=>{ bar.style.display='none'; }, 2500);
+}
+
+function recompute(){
+    fetch('/api/matching/recompute', {method:'POST'}).then(r=>r.json()).then(d=>{
+        if(d.status==='ok') showStatus(`已重算：主动性 ${d.initiative_count} 人，局型 ${d.style_count} 人`);
+        else showStatus('重算失败', true);
+    }).catch(e=>showStatus('重算失败：'+e.message, true));
+}
+
+async function searchPlayers(q){
+    const box = document.getElementById('playerSearchResults');
+    if(!q || q.trim().length===0){ box.style.display='none'; return; }
+    const res = await fetch('/api/players?search='+encodeURIComponent(q.trim()));
+    const list = await res.json();
+    box.innerHTML = '';
+    list.slice(0,8).forEach(p=>{
+        const item = document.createElement('button');
+        item.type='button'; item.className='list-group-item list-group-item-action py-1';
+        item.innerHTML = `<small>${p.name}</small> <span class="text-muted">${p.player_type||''} · ${p.activity_level||''}</span>`;
+        item.onclick = ()=>{ addExisting(p.id, p.name); box.style.display='none'; document.getElementById('playerSearchInput').value=''; };
+        box.appendChild(item);
+    });
+    box.style.display = list.length? 'block':'none';
+}
+
+function addExisting(id, name){
+    if(existingPlayers.find(x=>x.id===id)) return;
+    existingPlayers.push({id, name});
+    renderChips();
+}
+
+function renderChips(){
+    const box = document.getElementById('existingChips');
+    box.innerHTML = '';
+    existingPlayers.forEach((p,i)=>{
+        const chip = document.createElement('span');
+        chip.className='badge bg-primary me-1';
+        chip.innerHTML = `${p.name} <i class="bi bi-x" style="cursor:pointer" onclick="removeExisting(${i})"></i>`;
+        box.appendChild(chip);
+    });
+}
+function removeExisting(i){ existingPlayers.splice(i,1); renderChips(); }
+
+async function runMatch(){
+    const table_style = document.getElementById('inputStyle').value;
+    const stake = document.getElementById('inputStake').value;
+    const missing_count = parseInt(document.getElementById('inputMissing').value)||1;
+    const existing_ids = existingPlayers.map(p=>p.id);
+    const btn = event.target; btn.disabled=true;
+    try{
+        const res = await fetch('/api/table_matcher/match', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({table_style, stake, existing_ids, missing_count})
+        });
+        const d = await res.json();
+        renderResults(d);
+        showStatus(`匹配完成：推荐 ${d.recommended.length} 人，不推荐 ${d.not_recommended.length} 人`);
+    }catch(e){ showStatus('匹配失败：'+e.message, true); }
+    finally{ btn.disabled=false; }
+}
+
+function scoreBadge(score){
+    let color = score>=70?'success':score>=40?'warning':'secondary';
+    return `<span class="badge bg-${color}">${score}分</span>`;
+}
+
+function renderResults(d){
+    document.getElementById('recCount').textContent = d.recommended.length;
+    document.getElementById('noRecCount').textContent = d.not_recommended.length;
+    const recBox = document.getElementById('recommendedList');
+    const top = d.recommended_top && d.recommended_top.length ? d.recommended_top : d.recommended.slice(0,5);
+    if(top.length===0){
+        recBox.innerHTML = '<p class="text-muted">没有符合条件的推荐候选（可能玩家数据不足）。</p>';
+    } else {
+        recBox.innerHTML = top.map(c=>`
+            <div class="border rounded p-2 mb-2">
+                <div class="d-flex justify-content-between align-items-center">
+                    <strong>${c.name}</strong>
+                    <div>${scoreBadge(c.score)}
+                        <span class="badge bg-light text-dark">${c.initiative_tier}级·${c.initiative_level}</span>
+                        <span class="badge bg-info text-dark">${c.table_style_label}</span>
+                    </div>
+                </div>
+                <div class="progress my-1" style="height:6px">
+                    <div class="progress-bar" style="width:${c.score}%"></div>
+                </div>
+                <ul class="small text-muted mb-0">
+                    ${c.reasons.map(r=>`<li>${r}</li>`).join('')}
+                </ul>
+            </div>`).join('');
+    }
+    const noBox = document.getElementById('notRecommendedList');
+    if(d.not_recommended.length===0){
+        noBox.innerHTML = '<p class="text-muted">无强制排除项。</p>';
+    } else {
+        noBox.innerHTML = d.not_recommended.map(c=>`
+            <div class="border border-danger rounded p-2 mb-2">
+                <div class="d-flex justify-content-between">
+                    <strong>${c.name}</strong>
+                    <span class="badge bg-light text-dark">${c.initiative_tier}级·${c.initiative_level}</span>
+                </div>
+                <ul class="small text-danger mb-0">
+                    ${c.reasons.map(r=>`<li>${r}</li>`).join('')}
+                </ul>
+            </div>`).join('');
+    }
+}
+
+async function generateTasks(){
+    const table_style = document.getElementById('inputStyle').value;
+    const stake = document.getElementById('inputStake').value;
+    const missing_count = parseInt(document.getElementById('inputMissing').value)||1;
+    const existing_ids = existingPlayers.map(p=>p.id);
+    try{
+        const res = await fetch('/api/table_matcher/generate-tasks', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({table_style, stake, existing_ids, missing_count})
+        });
+        const d = await res.json();
+        if(d.status==='ok'){
+            const s = d.summary;
+            showStatus(`已生成 ${s.created} 条组局联系任务` + (s.skipped_existing? `（跳过 ${s.skipped_existing} 条重复）`:''));
+        } else showStatus('生成失败', true);
+    }catch(e){ showStatus('生成失败：'+e.message, true); }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}运营驾驶舱 - 青鹭雀庄{% endblock %}
+{% block page_name %}operations{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-brain"></i> 运营驾驶舱</h4>
+        <small class="text-muted">青鹭每日经营决策中枢 · 让系统从「记录客户」升级为「指导经营」</small>
+    </div>
+    <div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadData()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <button class="btn btn-outline-primary btn-sm" onclick="recompute()"><i class="bi bi-calculator"></i> 重算评分</button>
+        <button class="btn btn-primary btn-sm" onclick="genTasks()"><i class="bi bi-magic"></i> 生成今日任务</button>
+    </div>
+</div>
+
+<div id="statusBar"></div>
+
+<h6 class="mt-4 text-muted"><i class="bi bi-calendar-check"></i> 今日经营概览</h6>
+<div class="row g-2" id="overviewCards"></div>
+
+<h6 class="mt-4 text-muted"><i class="bi bi-graph-up"></i> 月 GMV 目标进度</h6>
+<div class="card p-3 shadow-sm" id="gmvCard"></div>
+
+<h6 class="mt-4 text-muted"><i class="bi bi-grid-3x3"></i> 桌局预测（基于历史同星期）</h6>
+<div class="row g-2" id="forecastCards"></div>
+
+<h6 class="mt-4 text-muted"><i class="bi bi-list-task"></i> 今日运营任务</h6>
+<div class="row g-3" id="taskBlocks"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let D = null;
+
+function fmtMoney(n){ return '¥' + (Math.round((n||0)*100)/100).toLocaleString('zh-CN'); }
+function pct(n){ return (Math.round((n||0)*10)/10) + '%'; }
+function prioColor(p){ return p==='high' ? 'danger' : p==='medium' ? 'warning' : 'secondary'; }
+function prioLabel(p){ return p==='high' ? '紧急' : p==='medium' ? '中' : '常规'; }
+
+function showStatus(msg, isErr){
+    const el = document.getElementById('statusBar');
+    el.innerHTML = `<div class="alert alert-${isErr?'danger':'success'} alert-dismissible fade show py-2" role="alert">
+        ${msg}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
+    if(!isErr) setTimeout(()=>{ el.innerHTML=''; }, 3500);
+}
+
+async function checkAuth(){
+    const r = await fetch('/api/auth/me'); const d = await r.json();
+    if(!d.authenticated){ window.location.href='/login'; return false; }
+    return true;
+}
+
+async function loadData(){
+    if(!(await checkAuth())) return;
+    try{
+        const r = await fetch('/api/operations/dashboard');
+        D = await r.json();
+        renderOverview(); renderGmv(); renderForecast(); renderTasks();
+        ensureTasks();
+    }catch(e){ showStatus('加载失败：' + e.message, true); }
+}
+
+async function ensureTasks(){
+    const total = D.tasks ? Object.values(D.tasks).reduce((a,b)=>a+(b?b.length:0),0) : 0;
+    if(total === 0){
+        try{
+            await fetch('/api/operations/generate-tasks', {method:'POST'});
+            const r2 = await fetch('/api/operations/dashboard');
+            D = await r2.json();
+            renderTasks();
+            showStatus('已自动生成今日运营任务');
+        }catch(e){}
+    }
+}
+
+function renderOverview(){
+    const o = D.overview, g = D.gmv;
+    const cards = [
+        {l:'今日GMV', v:fmtMoney(o.today_gmv), c:'text-primary'},
+        {l:'本月累计GMV', v:fmtMoney(g.month_gmv), c:'text-dark'},
+        {l:'距目标金额', v:fmtMoney(g.remaining), c:'text-danger'},
+        {l:'GMV完成率', v:pct(g.completion_pct), c:'text-success'},
+        {l:'今日桌数', v:o.tables_closed + ' 桌', c:'text-dark'},
+        {l:'今日活跃玩家', v:o.active_players + ' 人', c:'text-dark'},
+        {l:'新客数量', v:o.new_customers + ' 人', c:'text-info'},
+        {l:'老客复购', v:o.repeat_customers + ' 人', c:'text-dark'},
+    ];
+    document.getElementById('overviewCards').innerHTML = cards.map(c=>
+        `<div class="col-6 col-md-3"><div class="card shadow-sm h-100">
+            <div class="card-body py-2"><div class="small text-muted">${c.l}</div>
+            <div class="fs-5 fw-bold ${c.c}">${c.v}</div></div></div></div>`
+    ).join('');
+}
+
+function renderGmv(){
+    const g = D.gmv;
+    const w = Math.min(100, g.completion_pct);
+    document.getElementById('gmvCard').innerHTML = `
+        <div class="row align-items-center">
+            <div class="col-md-8">
+                <div class="d-flex justify-content-between small mb-1">
+                    <span>已完成 ${fmtMoney(g.month_gmv)}</span><span>目标 ${fmtMoney(g.target)}</span>
+                </div>
+                <div class="progress" style="height:22px">
+                    <div class="progress-bar ${g.completion_pct>=100?'bg-success':'bg-primary'}" style="width:${w}%">${pct(g.completion_pct)}</div>
+                </div>
+                <div class="small text-muted mt-2">剩余 <b class="text-danger">${fmtMoney(g.remaining)}</b> ｜ 本月还剩 ${g.remain_days} 天</div>
+            </div>
+            <div class="col-md-4 border-start">
+                <div class="small text-muted">按过去30天日均 ${fmtMoney(g.avg_daily_30d)} 预测月底：</div>
+                <div class="fs-5 fw-bold">${fmtMoney(g.forecast_month_end)}</div>
+                <div class="small ${g.forecast_gap>0?'text-danger':'text-success'}">
+                    ${g.forecast_gap>0 ? '预计缺口 '+fmtMoney(g.forecast_gap) : '预计超额 '+fmtMoney(-g.forecast_gap)}
+                </div>
+            </div>
+        </div>`;
+}
+
+function renderForecast(){
+    const f = D.forecast;
+    const cards = [
+        {l:'已确认桌数', v:f.confirmed, c:'text-success'},
+        {l:'潜在桌数', v:f.potential, c:'text-primary'},
+        {l:'缺口人数', v:f.gap_people, c:'text-danger'},
+    ];
+    document.getElementById('forecastCards').innerHTML = cards.map(c=>
+        `<div class="col-4"><div class="card shadow-sm"><div class="card-body py-2 text-center">
+            <div class="small text-muted">${c.l}</div><div class="fs-4 fw-bold ${c.c}">${c.v}</div></div></div></div>`
+    ).join('') + `<div class="col-12"><small class="text-muted">历史同星期闭桌数参考：${JSON.stringify(f.history_same_weekday)} ｜ 当前在桌人数：${f.in_seat}</small></div>`;
+}
+
+function renderTasks(){
+    const wrap = document.getElementById('taskBlocks');
+    const order = ['recover_customer','maintain_customer','new_customer_follow','organizer_develop','risk_warning'];
+    let html = '';
+    for(const t of order){
+        const items = (D.tasks && D.tasks[t]) || [];
+        const label = (D.task_type_labels && D.task_type_labels[t]) || t;
+        html += `<div class="col-md-6 col-lg-4"><div class="card h-100 shadow-sm">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-flag"></i> ${label}</span>
+                <span class="badge bg-secondary">${items.length}</span></div>
+            <div class="card-body p-2" style="max-height:340px;overflow:auto">`;
+        if(items.length===0){ html += '<div class="text-muted small p-2">暂无</div>'; }
+        else {
+            for(const it of items){
+                html += `<div class="border-bottom pb-2 mb-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <strong>${it.player_name || '未知'}</strong>
+                        <span class="badge bg-${prioColor(it.priority)}">${prioLabel(it.priority)}</span>
+                    </div>
+                    <div class="small text-muted mt-1">${it.description || ''}</div>
+                </div>`;
+            }
+        }
+        html += `</div></div></div>`;
+    }
+    wrap.innerHTML = html;
+}
+
+async function recompute(){
+    showStatus('正在重算玩家价值评分…');
+    try{
+        const r = await fetch('/api/operations/score', {method:'POST'});
+        const d = await r.json();
+        showStatus('评分已更新，共 ' + d.count + ' 位玩家');
+        loadData();
+    }catch(e){ showStatus('重算失败：' + e.message, true); }
+}
+
+async function genTasks(){
+    showStatus('正在生成今日运营任务…');
+    try{
+        const r = await fetch('/api/operations/generate-tasks', {method:'POST'});
+        const d = await r.json();
+        const s = d.summary;
+        const parts = Object.entries(s.created).map(([k,v])=> (D.task_type_labels[k]||k)+' '+v).join('，');
+        showStatus('已生成任务 — ' + parts + '；跳过已存在 ' + s.skipped_existing + ' 条');
+        loadData();
+    }catch(e){ showStatus('生成失败：' + e.message, true); }
+}
+
+document.addEventListener('DOMContentLoaded', loadData);
+</script>
+{% endblock %}

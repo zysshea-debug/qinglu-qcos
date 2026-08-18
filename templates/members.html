@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}会员管理 - 青鹭收银{% endblock %}
+{% block page_name %}members{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-credit-card-2-front"></i> 会员管理</h4>
+    <div class="d-flex gap-2">
+        <input type="text" class="form-control form-control-sm" id="memberSearch" placeholder="搜索姓名/手机..." style="width:240px" oninput="searchMembers()">
+        <button class="btn btn-primary btn-sm" onclick="openNewMemberModal()">
+            <i class="bi bi-plus-circle"></i> 添加会员
+        </button>
+    </div>
+</div>
+
+<div class="row g-3 mb-4" id="memberStatsRow">
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">会员总数</div>
+            <div class="value" id="totalMembers">0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">总余额</div>
+            <div class="value income" id="totalBalance">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">总充值</div>
+            <div class="value" id="totalRecharge">¥0</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="stat-card">
+            <div class="label">总消费</div>
+            <div class="value fee" id="totalSpent">¥0</div>
+        </div>
+    </div>
+</div>
+
+<div id="memberList"></div>
+
+<!-- 充值弹窗 -->
+<div class="modal fade" id="rechargeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">会员充值 - <span id="rechargeMemberName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="rechargeMemberId">
+                <div class="member-card">
+                    <div class="mname" id="rechargeName"></div>
+                    <div class="mbalance">¥<span id="rechargeBalance">0</span> <small>当前余额</small></div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">充值金额</label>
+                    <div class="btn-group w-100 mb-2">
+                        <button class="btn btn-outline-primary" onclick="setRechargeAmount(50)">¥50</button>
+                        <button class="btn btn-outline-primary" onclick="setRechargeAmount(100)">¥100</button>
+                        <button class="btn btn-outline-primary" onclick="setRechargeAmount(200)">¥200</button>
+                        <button class="btn btn-outline-primary" onclick="setRechargeAmount(500)">¥500</button>
+                    </div>
+                    <input type="number" class="form-control" id="rechargeAmount" placeholder="或输入金额" min="1">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">收款方式</label>
+                    <select class="form-select" id="rechargePayment">
+                        <option value="meituan_active">美团-主动扫码</option>
+                        <option value="meituan_passive">美团-被动扫码</option>
+                        <option value="wechat">微信</option>
+                        <option value="alipay">支付宝</option>
+                        <option value="cash">现金</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">备注</label>
+                    <input type="text" class="form-control" id="rechargeNote">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-lg" onclick="confirmRecharge()">
+                    <i class="bi bi-wallet2"></i> 确认充值
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 充值记录弹窗 -->
+<div class="modal fade" id="rechargeHistoryModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">充值记录 - <span id="historyMemberName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <table class="table table-sm">
+                    <thead><tr><th>时间</th><th>金额</th><th>余额变化</th><th>方式</th><th>操作人</th></tr></thead>
+                    <tbody id="rechargeHistoryList"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 开通会员弹窗 -->
+<div class="modal fade" id="newMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">开通会员</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">选择玩家</label>
+                    <input type="text" class="form-control mb-2" id="newMemberSearch" placeholder="输入姓名/手机搜索..." oninput="filterNewMemberPlayers()">
+                    <select class="form-select" id="newMemberPlayer">
+                        <option value="">-- 选择非会员玩家 --</option>
+                    </select>
+                    <div id="newMemberNoResult" class="mt-2 d-none">
+                        <div class="text-muted small">未找到匹配玩家</div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="showNewPlayerForm()">
+                            <i class="bi bi-plus-circle"></i> 新增玩家并开通会员
+                        </button>
+                    </div>
+                </div>
+                <div id="newPlayerForm" class="d-none border rounded p-3 mb-3 bg-light">
+                    <h6 class="mb-3"><i class="bi bi-person-plus"></i> 新增玩家</h6>
+                    <div class="mb-2">
+                        <label class="form-label">姓名 <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="newMemberNewName" placeholder="新玩家姓名">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label">手机</label>
+                        <input type="text" class="form-control" id="newMemberNewPhone" placeholder="选填">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label">段位</label>
+                        <input type="text" class="form-control" id="newMemberNewDan" placeholder="选填，如 雀豪">
+                    </div>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="hideNewPlayerForm()">返回搜索</button>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">会员手机号</label>
+                    <input type="tel" class="form-control" id="newMemberPhone" placeholder="选填，未填则继承玩家档案手机号">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">消费密码 <small class="text-muted">(6位数字，不填则免密)</small></label>
+                    <input type="password" class="form-control" id="newMemberPin" placeholder="6位数字" maxlength="6" inputmode="numeric" pattern="\d{6}">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">初始充值金额</label>
+                    <input type="number" class="form-control" id="newMemberBalance" value="0" min="0">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">收款方式</label>
+                    <select class="form-select" id="newMemberPayment">
+                        <option value="wechat">微信</option>
+                        <option value="alipay">支付宝</option>
+                        <option value="cash">现金</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmNewMember()">开通</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑会员资料弹窗 -->
+<div class="modal fade" id="editMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑会员资料 - <span id="editMemberName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editMemberId">
+                <div class="mb-3">
+                    <label class="form-label">会员手机号</label>
+                    <input type="tel" class="form-control" id="editMemberPhone" placeholder="会员手机号">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">消费密码 <small class="text-muted">(6位数字，留空表示不变)</small></label>
+                    <input type="password" class="form-control" id="editMemberPin" placeholder="留空不修改" maxlength="6" inputmode="numeric" pattern="\d{6}">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmEditMember()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

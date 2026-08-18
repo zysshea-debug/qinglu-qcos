@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}分析中心 - 青鹭雀庄{% endblock %}
+{% block page_name %}analytics{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-pie-chart-fill"></i> 青鹭经营分析中心</h4>
+        <small class="text-muted">实时经营概览 · 一键导出 AI 分析包，让 QCOS 成为「可被 AI 持续分析的经营数据库」</small>
+    </div>
+    <div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadDashboard()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <button class="btn btn-warning btn-sm" onclick="downloadExcel()"><i class="bi bi-file-earmark-excel"></i> 导出 Excel</button>
+        <button class="btn btn-primary btn-sm" onclick="downloadAI()"><i class="bi bi-box-seam"></i> 生成 AI 分析包</button>
+    </div>
+</div>
+
+<div id="statusBar"></div>
+
+<!-- 时间筛选 -->
+<div class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="small text-muted me-1"><i class="bi bi-calendar-range"></i> 时间范围：</span>
+            <div class="btn-group btn-group-sm" role="group" id="filterGroup">
+                <button type="button" class="btn btn-outline-primary active" data-filter="today">今日</button>
+                <button type="button" class="btn btn-outline-primary" data-filter="7d">近7天</button>
+                <button type="button" class="btn btn-outline-primary" data-filter="30d">近30天</button>
+                <button type="button" class="btn btn-outline-primary" data-filter="month">本月</button>
+            </div>
+            <div class="d-flex align-items-center gap-1 ms-2">
+                <span class="small text-muted">自定义：</span>
+                <input type="date" id="customStart" class="form-control form-control-sm" style="width:auto">
+                <span class="small text-muted">至</span>
+                <input type="date" id="customEnd" class="form-control form-control-sm" style="width:auto">
+                <button class="btn btn-sm btn-outline-primary" onclick="applyCustom()">应用</button>
+            </div>
+            <span class="small text-muted ms-auto" id="rangeLabel"></span>
+        </div>
+    </div>
+</div>
+
+<section>
+    <h6 class="mt-3 text-muted"><i class="bi bi-cash-coin"></i> 营业指标</h6>
+    <div class="row g-2" id="businessCards"></div>
+</section>
+
+<section>
+    <h6 class="mt-4 text-muted"><i class="bi bi-receipt"></i> 历史组局实收 <small class="fw-normal text-secondary">（来自 Excel 导入的真实支付金额）</small></h6>
+    <div class="row g-2" id="historicalCards"></div>
+</section>
+
+<section>
+    <h6 class="mt-4 text-muted"><i class="bi bi-grid-3x3"></i> 桌局指标</h6>
+    <div class="row g-2" id="tablesCards"></div>
+</section>
+
+<section>
+    <h6 class="mt-4 text-muted"><i class="bi bi-people"></i> 客户指标</h6>
+    <div class="row g-2" id="customersCards"></div>
+</section>
+
+<section>
+    <h6 class="mt-4 text-muted"><i class="bi bi-gear-wide-connected"></i> 运营指标</h6>
+    <div class="row g-2" id="operationsCards"></div>
+</section>
+
+<div class="text-muted small mt-4 mb-5">
+    <i class="bi bi-info-circle"></i> 营业指标为固定参考（今日/本周/本月/目标/预测），不随上方筛选变化；桌局指标随筛选范围变化；客户与运营指标为全局口径。点击「生成 AI 分析包」可下载含 6 份 JSON + 分析提示词的完整数据包。
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/analytics.js') }}?v=20260814g"></script>
+{% endblock %}

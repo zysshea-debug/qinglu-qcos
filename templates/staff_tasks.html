@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block title %}店员工作台 - 青鹭雀庄{% endblock %}
+{% block page_name %}staff_tasks{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+        <h4 class="mb-0"><i class="bi bi-clipboard-check"></i> 店员工作台</h4>
+        <small class="text-muted">13:00 上班打开系统，今天该联系谁、维护谁、关注什么一目了然</small>
+    </div>
+    <div>
+        <button class="btn btn-outline-secondary btn-sm" onclick="loadData()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+        <button class="btn btn-primary btn-sm" onclick="genTasks()"><i class="bi bi-magic"></i> 生成今日任务</button>
+    </div>
+</div>
+
+<div id="statusBar"></div>
+
+<div class="row g-3 mt-1">
+    <!-- 今日任务 -->
+    <div class="col-lg-7">
+        <h6 class="text-muted"><i class="bi bi-list-task"></i> 今日任务 <span id="taskCount" class="badge bg-secondary"></span></h6>
+        <div id="taskList"></div>
+    </div>
+    <!-- 右侧：桌局 / 重点 / 生日 -->
+    <div class="col-lg-5">
+        <h6 class="text-muted"><i class="bi bi-grid-3x3"></i> 今日预计桌局</h6>
+        <div class="row g-2 mb-3" id="forecastCards"></div>
+
+        <h6 class="text-muted"><i class="bi bi-star-fill"></i> 重点客户（A+/A）</h6>
+        <div id="keyCustomers" class="mb-3"></div>
+
+        <h6 class="text-muted"><i class="bi bi-cake2"></i> 生日提醒（本月）</h6>
+        <div id="birthdays"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let D = null;
+const TTYPE = {
+    'recover_customer':'客户召回', 'maintain_customer':'客户维护',
+    'new_customer_follow':'新客转化', 'organizer_develop':'组织者培养',
+    'risk_warning':'风险预警'
+};
+const LV = {'A+':'danger','A':'warning','B':'primary','C':'secondary','D':'light'};
+
+function prioColor(p){ return p==='high'?'danger':p==='medium'?'warning':'secondary'; }
+function prioLabel(p){ return p==='high'?'紧急':p==='medium'?'中':'常规'; }
+
+function showStatus(msg, isErr){
+    const el = document.getElementById('statusBar');
+    el.innerHTML = `<div class="alert alert-${isErr?'danger':'success'} alert-dismissible fade show py-2" role="alert">
+        ${msg}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
+    if(!isErr) setTimeout(()=>{ el.innerHTML=''; }, 3500);
+}
+
+async function checkAuth(){
+    const r = await fetch('/api/auth/me'); const d = await r.json();
+    if(!d.authenticated){ window.location.href='/login'; return false; }
+    return true;
+}
+
+async function loadData(){
+    if(!(await checkAuth())) return;
+    try{
+        const r = await fetch('/api/operations/staff');
+        D = await r.json();
+        renderTasks(); renderForecast(); renderKey(); renderBirth();
+        ensureTasks();
+    }catch(e){ showStatus('加载失败：' + e.message, true); }
+}
+
+async function ensureTasks(){
+    if((D.tasks||[]).length === 0){
+        try{
+            await fetch('/api/operations/generate-tasks', {method:'POST'});
+            const r2 = await fetch('/api/operations/staff');
+            D = await r2.json();
+            renderTasks();
+            showStatus('已自动生成今日任务');
+        }catch(e){}
+    }
+}
+
+function renderTasks(){
+    const list = D.tasks || [];
+    document.getElementById('taskCount').textContent = list.length;
+    const wrap = document.getElementById('taskList');
+    if(list.length===0){ wrap.innerHTML = '<div class="text-muted small p-2">今日暂无待办任务。</div>'; return; }
+    wrap.innerHTML = list.map(t=>`
+        <div class="card shadow-sm mb-2" id="task-${t.id}">
+            <div class="card-body py-2 d-flex justify-content-between align-items-center">
+                <div style="flex:1">
+                    <div class="d-flex gap-2 align-items-center mb-1">
+                        <span class="badge bg-${prioColor(t.priority)}">${prioLabel(t.priority)}</span>
+                        <span class="badge bg-info">${TTYPE[t.task_type]||t.task_type}</span>
+                        <strong>${t.player_name||'未知'}</strong>
+                    </div>
+                    <div class="small text-muted">${t.description||''}</div>
+                </div>
+                <button class="btn btn-sm btn-success ms-2" onclick="completeTask(${t.id})"><i class="bi bi-check-lg"></i> 完成</button>
+            </div>
+        </div>`).join('');
+}
+
+function renderForecast(){
+    const f = D.forecast;
+    const cards = [
+        {l:'已确认桌数', v:f.confirmed, c:'text-success'},
+        {l:'潜在桌数', v:f.potential, c:'text-primary'},
+        {l:'缺口人数', v:f.gap_people, c:'text-danger'},
+    ];
+    document.getElementById('forecastCards').innerHTML = cards.map(c=>
+        `<div class="col-4"><div class="card shadow-sm"><div class="card-body py-2 text-center">
+            <div class="small text-muted">${c.l}</div><div class="fs-5 fw-bold ${c.c}">${c.v}</div></div></div></div>`
+    ).join('');
+}
+
+function renderKey(){
+    const k = D.key_customers || [];
+    const wrap = document.getElementById('keyCustomers');
+    if(k.length===0){ wrap.innerHTML = '<div class="text-muted small">暂无A+/A级客户。</div>'; return; }
+    wrap.innerHTML = k.map(p=>`
+        <div class="d-flex justify-content-between align-items-center border-bottom py-1">
+            <div><strong>${p.name}</strong>
+                <span class="badge bg-${LV[p.customer_level]||'secondary'}">${p.customer_level}</span>
+                <span class="small text-muted">分 ${p.customer_score}</span></div>
+            <div class="small text-muted">${p.phone||''} ${p.last_visit?('· '+p.last_visit):''}</div>
+        </div>`).join('');
+}
+
+function renderBirth(){
+    const b = D.birthdays || [];
+    const wrap = document.getElementById('birthdays');
+    if(b.length===0){ wrap.innerHTML = '<div class="text-muted small">本月无生日客户。</div>'; return; }
+    wrap.innerHTML = b.map(p=>`
+        <div class="d-flex justify-content-between align-items-center border-bottom py-1">
+            <div><strong>${p.name}</strong> <span class="small text-muted">${p.birthday}</span></div>
+            <div class="small text-muted">${p.phone||''}</div>
+        </div>`).join('');
+}
+
+async function completeTask(id){
+    try{
+        const r = await fetch('/api/operations/tasks/'+id+'/complete', {method:'POST'});
+        const d = await r.json();
+        if(d.status==='ok'){ showStatus('任务已完成'); loadData(); }
+        else showStatus('操作失败', true);
+    }catch(e){ showStatus('失败：' + e.message, true); }
+}
+
+async function genTasks(){
+    showStatus('正在生成今日任务…');
+    try{
+        const r = await fetch('/api/operations/generate-tasks', {method:'POST'});
+        const d = await r.json();
+        const s = d.summary;
+        const parts = Object.entries(s.created).map(([k,v])=> (TTYPE[k]||k)+' '+v).join('，');
+        showStatus('已生成 — ' + parts + '；跳过 ' + s.skipped_existing + ' 条已存在');
+        loadData();
+    }catch(e){ showStatus('生成失败：' + e.message, true); }
+}
+
+document.addEventListener('DOMContentLoaded', loadData);
+</script>
+{% endblock %}

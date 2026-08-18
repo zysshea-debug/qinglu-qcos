@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}商品管理 - 青鹭收银{% endblock %}
+{% block page_name %}products{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h4><i class="bi bi-cup-straw"></i> 商品管理</h4>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" onclick="openProductModal()">
+            <i class="bi bi-plus-circle"></i> 添加商品
+        </button>
+    </div>
+</div>
+
+<div class="mb-3">
+    <div class="btn-group" role="group">
+        <button class="btn btn-sm btn-outline-primary active" onclick="filterProducts('all', this)">全部</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="filterProducts('drink', this)">饮料</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="filterProducts('snack', this)">零食</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="filterProducts('other', this)">其他</button>
+    </div>
+</div>
+
+<div class="product-grid" id="productGrid"></div>
+
+<div class="mt-4">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>今日销售记录</span>
+            <input type="date" class="form-control form-control-sm" id="salesDate" style="width:160px">
+        </div>
+        <div class="card-body p-0">
+            <table class="table table-hover mb-0">
+                <thead><tr><th>时间</th><th>商品</th><th>单价</th><th>数量</th><th>小计</th><th>支付</th></tr></thead>
+                <tbody id="salesList"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- 商品编辑弹窗 -->
+<div class="modal fade" id="productModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="productModalTitle">添加商品</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="productId">
+                <div class="mb-3">
+                    <label class="form-label">商品名称</label>
+                    <input type="text" class="form-control" id="productName" required>
+                </div>
+                <div class="row g-3">
+                    <div class="col-6">
+                        <label class="form-label">分类</label>
+                        <select class="form-select" id="productCategory">
+                            <option value="drink">饮料</option>
+                            <option value="snack">零食</option>
+                            <option value="other">其他</option>
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">售价 (¥)</label>
+                        <input type="number" class="form-control" id="productPrice" step="0.5" required>
+                    </div>
+                </div>
+                <div class="row g-3 mt-1">
+                    <div class="col-6">
+                        <label class="form-label">成本 (¥)</label>
+                        <input type="number" class="form-control" id="productCost" step="0.5">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label">库存 (-1=不限)</label>
+                        <input type="number" class="form-control" id="productStock" value="-1">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="saveProduct()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
