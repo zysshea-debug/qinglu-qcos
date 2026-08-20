@@ -308,11 +308,18 @@ def test_real_db():
     if not os.path.exists(REAL_DB):
         print('  [SKIP] 未找到真实库 qcos.db，跳过')
         return
+    # 真实库只读副本 + 跑一次 init_db 迁移（含 players.status 归档字段），
+    # 验证新 schema 下 analytics 对真实数据端到端可用；绝不直接改真实库。
+    import shutil
+    real_copy = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+    real_copy.close()
+    shutil.copy2(REAL_DB, real_copy.name)
     old_cfg = config.DB_PATH
     old_mod = models.DB_PATH
-    config.DB_PATH = REAL_DB
-    models.DB_PATH = REAL_DB
+    config.DB_PATH = real_copy.name
+    models.DB_PATH = real_copy.name
     try:
+        models.init_db()
         rdb = models.get_db()
         rdb.execute('PRAGMA busy_timeout=30000')
         d = A.get_dashboard(rdb, '30d')
@@ -332,6 +339,10 @@ def test_real_db():
     finally:
         config.DB_PATH = old_cfg
         models.DB_PATH = old_mod
+        try:
+            os.remove(real_copy.name)
+        except OSError:
+            pass
 
 
 if __name__ == '__main__':

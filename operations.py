@@ -271,8 +271,8 @@ def _score_player(p, act, today):
 
 
 def compute_player_scores(db):
-    """重算所有玩家评分，写回 players 表，返回结果列表。"""
-    players = db.execute('SELECT * FROM players').fetchall()
+    """重算所有活跃玩家评分，写回 players 表，返回结果列表（归档玩家不参与）。"""
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     today = _today()
     results = []
     for p in players:
@@ -311,7 +311,8 @@ def generate_operation_tasks(db):
     today = _today()
     d7 = today - timedelta(days=7)
     d14 = today - timedelta(days=14)
-    players = db.execute('SELECT * FROM players').fetchall()
+    # 仅活跃玩家参与召回/维护/培养等运营任务；归档玩家不进入
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     created = {k: 0 for k in TASK_TYPE_LABELS}
     skipped = 0
 
@@ -577,12 +578,13 @@ def get_staff_dashboard(db):
             flat.append(t)
     key = db.execute(
         "SELECT id,name,customer_level,customer_score,phone,last_visit FROM players "
-        "WHERE customer_level IN ('A+','A') ORDER BY customer_score DESC"
+        "WHERE customer_level IN ('A+','A') AND (status IS NULL OR status='active') ORDER BY customer_score DESC"
     ).fetchall()
     month = today.month
     birthdays = []
     allp = db.execute(
-        "SELECT id,name,birthday,phone FROM players WHERE birthday IS NOT NULL AND birthday != ''"
+        "SELECT id,name,birthday,phone FROM players "
+        "WHERE birthday IS NOT NULL AND birthday != '' AND (status IS NULL OR status='active')"
     ).fetchall()
     for p in allp:
         b = p['birthday']

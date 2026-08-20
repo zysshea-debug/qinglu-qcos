@@ -233,9 +233,9 @@ def _player_spend(db, pid, pname):
 
 
 def aggregate_customers(db, start, end):
-    """客户指标。total/active_30d/level_a/level_b/churned 为全局参考；
+    """客户指标。total/active_30d/level_a/level_b/churned 为全局参考（仅活跃玩家）；
     new_players / repeat_players 受时间筛选影响（基于 [start, end]）。"""
-    players = db.execute('SELECT * FROM players').fetchall()
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     total = len(players)
 
     d30 = (_today() - timedelta(days=30)).isoformat()
@@ -256,7 +256,8 @@ def aggregate_customers(db, start, end):
 
     new_players = db.execute(
         '''SELECT p.id FROM players p
-           WHERE (SELECT MIN(date(s.start_time)) FROM session_players sp
+           WHERE (p.status IS NULL OR p.status='active')
+             AND (SELECT MIN(date(s.start_time)) FROM session_players sp
                   JOIN sessions s ON sp.session_id=s.id WHERE sp.player_id=p.id) BETWEEN ? AND ?''',
         [start, end]
     ).fetchall()
@@ -264,7 +265,8 @@ def aggregate_customers(db, start, end):
 
     repeat_players = db.execute(
         '''SELECT p.id FROM players p
-           WHERE (SELECT COUNT(DISTINCT sp.session_id) FROM session_players sp
+           WHERE (p.status IS NULL OR p.status='active')
+             AND (SELECT COUNT(DISTINCT sp.session_id) FROM session_players sp
                   JOIN sessions s ON sp.session_id=s.id
                   WHERE (sp.player_id=p.id OR sp.player_name=p.name)
                     AND date(s.start_time) <= ?) >= 2''',
@@ -274,8 +276,9 @@ def aggregate_customers(db, start, end):
 
     churned = db.execute(
         '''SELECT id, name, customer_level, last_visit FROM players
-           WHERE customer_level = 'D'
-              OR (last_visit IS NOT NULL AND last_visit < ?)''',
+           WHERE (status IS NULL OR status='active')
+             AND (customer_level = 'D'
+              OR (last_visit IS NOT NULL AND last_visit < ?))''',
         [d30]
     ).fetchall()
     churned_count = len(churned)
@@ -301,15 +304,16 @@ def aggregate_operations(db):
         "SELECT COUNT(*) c FROM operation_tasks WHERE status='completed'").fetchone()['c']
     completion_rate = round(done_tasks / total_tasks * 100, 1) if total_tasks else 0.0
 
-    players = db.execute('SELECT * FROM players').fetchall()
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     active_init = sum(1 for p in players if dict(p).get('initiative_level') == 'active')
     passive_init = sum(1 for p in players if dict(p).get('initiative_level') == 'passive')
 
     organizer_candidates = db.execute(
         """SELECT COUNT(*) c FROM players
-           WHERE is_organizer = 1
+           WHERE (status IS NULL OR status='active')
+             AND (is_organizer = 1
               OR (organizer_candidate IS NOT NULL AND organizer_candidate != ''
-                  AND organizer_candidate NOT IN ('no', '否', '0'))"""
+                  AND organizer_candidate NOT IN ('no', '否', '0')))"""
     ).fetchone()['c']
 
     best = tl.get_best_combinations(db, 999)
@@ -402,8 +406,9 @@ def build_business_summary(db):
 
 
 def build_players_analysis(db):
-    """players_analysis.json：玩家 等级 / 活跃 / 消费 / 组织能力 / 风险 / 体验评分。"""
-    players = db.execute('SELECT * FROM players ORDER BY id').fetchall()
+    """players_analysis.json：玩家 等级 / 活跃 / 消费 / 组织能力 / 风险 / 体验评分。
+    仅统计活跃玩家；归档玩家不进入活跃度统计。"""
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active') ORDER BY id").fetchall()
     rows = []
     for p in players:
         p = dict(p)
@@ -527,8 +532,8 @@ def build_table_analysis(db):
 
 
 def build_customer_segments(db):
-    """customer_segments.json：A/B/C/D 客户分层。"""
-    players = db.execute('SELECT * FROM players ORDER BY id').fetchall()
+    """customer_segments.json：A/B/C/D 客户分层（仅活跃玩家）。"""
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active') ORDER BY id").fetchall()
     segments = {'A+': [], 'A': [], 'B': [], 'C': [], 'D': []}
     counts = {}
     for p in players:
@@ -762,9 +767,9 @@ def export_excel(db, filter_type='month', custom_start=None, custom_end=None):
             cur += timedelta(days=1)
     write_table(ws, ['日期', 'GMV', '桌数', '玩家数'], daily)
 
-    # ---- Sheet 3: 玩家列表 ----
+    # ---- Sheet 3: 玩家列表（仅活跃玩家）----
     ws = wb.create_sheet('玩家列表')
-    players = db.execute('SELECT * FROM players ORDER BY id').fetchall()
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active') ORDER BY id").fetchall()
     prows = []
     for p in players:
         p = dict(p)

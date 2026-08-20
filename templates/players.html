@@ -19,6 +19,11 @@
             <option value="竞技">竞技</option>
             <option value="娱乐">娱乐</option>
         </select>
+        <select class="form-select form-select-sm" id="filterStatus" style="width:110px" onchange="fetchPlayers()">
+            <option value="active" selected>活跃</option>
+            <option value="all">全部</option>
+            <option value="archived">已归档</option>
+        </select>
         <select class="form-select form-select-sm" id="filterOrganizer" style="width:110px" onchange="searchPlayers()">
             <option value="">全部</option>
             <option value="yes">组织者</option>
@@ -34,7 +39,7 @@
 <div class="row g-2 mb-3" id="playerStats">
     <div class="col-6 col-md-3">
         <div class="stat-card">
-            <div class="label"><i class="bi bi-people text-primary"></i> 总玩家</div>
+            <div class="label"><i class="bi bi-people text-primary"></i> 总玩家 <small class="text-muted" id="statArchived"></small></div>
             <div class="value" id="statTotal">0</div>
         </div>
     </div>
@@ -251,6 +256,35 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
                 <button type="button" class="btn btn-primary" id="detailEditBtn">编辑</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 归档玩家弹窗 -->
+<div class="modal fade" id="archiveReasonModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-archive"></i> 归档玩家</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>确认归档 <strong id="archivePlayerName"></strong>？</p>
+                <p class="text-muted small">归档后不再出现在活跃玩家列表，不参与组局/邀约/统计；历史场次、消费、会员余额全部保留。</p>
+                <label class="form-label">归档原因（可选）</label>
+                <select class="form-select" id="archiveReasonSelect">
+                    <option value="">-</option>
+                    <option value="不再玩日麻">不再玩日麻</option>
+                    <option value="离开成都">离开成都</option>
+                    <option value="重复档案">重复档案</option>
+                    <option value="改称号/重建档案">改称号/重建档案</option>
+                    <option value="其他">其他</option>
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-warning" onclick="confirmArchivePlayer()">确认归档</button>
             </div>
         </div>
     </div>

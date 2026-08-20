@@ -114,7 +114,10 @@ def init_db():
             is_member INTEGER DEFAULT 0,
             member_id INTEGER,
             created_at TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            status TEXT DEFAULT 'active',
+            archived_at TEXT,
+            archive_reason TEXT
         );
 
         -- 会员储值
@@ -685,6 +688,18 @@ def init_db():
     }
     for col_name, col_type in new_player_cols.items():
         if col_name not in p_col_names:
+            db.execute(f'ALTER TABLE players ADD COLUMN {col_name} {col_type}')
+
+    # ===== 迁移：players 归档/停用支持 =====
+    # status: active / archived；归档不删除任何历史数据。
+    p_cols3 = db.execute('PRAGMA table_info(players)').fetchall()
+    p_col_names3 = [c['name'] for c in p_cols3]
+    for col_name, col_type in [
+        ('status', "TEXT DEFAULT 'active'"),
+        ('archived_at', 'TEXT'),
+        ('archive_reason', 'TEXT'),
+    ]:
+        if col_name not in p_col_names3:
             db.execute(f'ALTER TABLE players ADD COLUMN {col_name} {col_type}')
 
     # ===== 迁移：ci_competitors 加运营信息字段 =====

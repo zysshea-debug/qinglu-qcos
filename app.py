@@ -492,15 +492,23 @@ def api_close_session(session_id):
     # 商品总额
     product_total = data.get('product_total', 0)
 
-    # 会员扣款
+    # 会员扣款（资金安全：会员必须属于本场某玩家且有效，禁止伪造跨会员扣款）
     member_id = data.get('member_id')
     payment_method = data.get('payment_method')
     grand_total = round(final_fee + product_total, 2)
 
-    if payment_method == 'member' and member_id:
-        member = db.execute('SELECT * FROM members WHERE id=?', [member_id]).fetchone()
+    if payment_method == 'member':
+        if not member_id:
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
+        session_player_ids = [r['player_id'] for r in
+                              db.execute('SELECT player_id FROM session_players WHERE session_id=?', [session_id]).fetchall()]
+        placeholders = ','.join('?' * len(session_player_ids)) if session_player_ids else 'NULL'
+        member = db.execute(
+            f"SELECT * FROM members WHERE id=? AND player_id IN ({placeholders}) AND status='active'",
+            [member_id] + session_player_ids
+        ).fetchone()
         if not member:
-            return jsonify({'error': '会员不存在'}), 400
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
         if member['balance'] < grand_total:
             return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{grand_total:.2f})'}), 400
         db.execute(
@@ -713,25 +721,21 @@ def api_player_preview(session_id, sp_id):
         available_discounts.append(d)
     sp['available_discounts'] = available_discounts
 
-    # 会员信息 - 直接查 members 表，不依赖 players.is_member 标志位
+    # 会员信息：唯一可信来源 = 当前玩家(player_id)在 members 表的正式关联且有效的记录。
+    # 严禁按姓名 fallback / 模糊匹配 / 缓存 / 上一个玩家状态，避免非会员串出他人余额（资金安全）。
+    # 同时忽略 players 表上的 is_member/member_id 标志位（可能为孤儿关联），以 members 实查为准。
     sp['member_info'] = None
+    sp['is_member'] = 0
+    sp['member_id'] = None
     lookup_player_id = sp.get('player_id') or sp.get('pid')
     if lookup_player_id:
-        m = db.execute('SELECT * FROM members WHERE player_id=?', [lookup_player_id]).fetchone()
+        m = db.execute(
+            "SELECT * FROM members WHERE player_id=? AND status='active'", [lookup_player_id]
+        ).fetchone()
         if m:
             sp['member_info'] = dict(m)
             sp['is_member'] = 1
             sp['member_id'] = m['id']
-    if not sp['member_info']:
-        # 兜底：按名字查 players 表，再查 members
-        p = db.execute('SELECT id FROM players WHERE name=? ORDER BY is_member DESC LIMIT 1', [sp['player_name']])
-        p = p.fetchone() if p else None
-        if p:
-            m = db.execute('SELECT * FROM members WHERE player_id=?', [p['id']]).fetchone()
-            if m:
-                sp['member_info'] = dict(m)
-                sp['is_member'] = 1
-                sp['member_id'] = m['id']
 
     return jsonify(sp)
 
@@ -947,11 +951,16 @@ def api_player_checkout(session_id, sp_id):
             return jsonify({'error': '支付金额与结账金额不一致，不能结账'}), 400
         db.execute('UPDATE payments SET session_player_id=? WHERE out_trade_no=?', [sp_id, payment_ref])
 
-    # 会员扣款
-    if payment_method == 'member' and member_id:
-        member = db.execute('SELECT * FROM members WHERE id=?', [member_id]).fetchone()
+    # 会员扣款（资金安全：必须二次校验会员真正属于当前玩家，禁止伪造跨会员扣款）
+    if payment_method == 'member':
+        if not member_id:
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
+        member = db.execute(
+            "SELECT * FROM members WHERE id=? AND player_id=? AND status='active'",
+            [member_id, sp['player_id']]
+        ).fetchone()
         if not member:
-            return jsonify({'error': '会员不存在'}), 400
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
         if member['balance'] < grand_total:
             return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{grand_total:.2f})'}), 400
         db.execute(
@@ -1214,6 +1223,8 @@ def api_players():
     activity = request.args.get('activity', '').strip()
     ptype = request.args.get('type', '').strip()
     organizer = request.args.get('organizer', '').strip()
+    # 状态筛选：默认 active（店员日常看不到已归档）；all=全部；archived=仅已归档
+    status = request.args.get('status', 'active').strip() or 'active'
 
     query = 'SELECT * FROM players WHERE 1=1'
     params = []
@@ -1229,6 +1240,11 @@ def api_players():
     if organizer:
         query += ' AND is_organizer = ?'
         params.append(1 if organizer == 'yes' else 0)
+    if status == 'archived':
+        query += " AND status = 'archived'"
+    elif status == 'active':
+        query += " AND (status IS NULL OR status = 'active')"
+    # status == 'all' → 不过滤
     query += ' ORDER BY total_visits DESC, name'
     rows = db.execute(query, params).fetchall()
     result = []
@@ -1241,6 +1257,60 @@ def api_players():
             r['balance'] = None
         result.append(r)
     return jsonify(result)
+
+
+@app.route('/api/players/stats')
+@role_required('players')
+def api_player_stats():
+    """玩家档案顶部统计口径（归档玩家不进入活跃指标，但计入已归档数）。"""
+    db = g.db
+    active = db.execute("SELECT COUNT(*) c FROM players WHERE status IS NULL OR status='active'").fetchone()['c']
+    archived = db.execute("SELECT COUNT(*) c FROM players WHERE status='archived'").fetchone()['c']
+    high = db.execute(
+        "SELECT COUNT(*) c FROM players WHERE (status IS NULL OR status='active') AND activity_level='高'"
+    ).fetchone()['c']
+    competitive = db.execute(
+        "SELECT COUNT(*) c FROM players WHERE (status IS NULL OR status='active') AND player_type='竞技'"
+    ).fetchone()['c']
+    organizer = db.execute(
+        "SELECT COUNT(*) c FROM players WHERE (status IS NULL OR status='active') AND is_organizer=1"
+    ).fetchone()['c']
+    return jsonify({
+        'total_active': active,
+        'total_archived': archived,
+        'high_active': high,
+        'competitive_active': competitive,
+        'organizer_active': organizer,
+    })
+
+
+# 永久删除前的引用检查：任何真实历史都阻止物理删除
+PLAYER_HISTORY_REF_QUERIES = [
+    ('session_players', 'SELECT COUNT(*) c FROM session_players WHERE player_id=?'),
+    ('sessions', 'SELECT COUNT(DISTINCT s.id) c FROM sessions s JOIN session_players sp ON sp.session_id=s.id WHERE sp.player_id=?'),
+    ('product_sales', 'SELECT COUNT(*) c FROM product_sales WHERE player_id=? OR session_player_id IN (SELECT id FROM session_players WHERE player_id=?)'),
+    ('members', 'SELECT COUNT(*) c FROM members WHERE player_id=?'),
+    ('recharge_records', 'SELECT COUNT(*) c FROM recharge_records WHERE member_id IN (SELECT id FROM members WHERE player_id=?)'),
+    ('visit_records', 'SELECT COUNT(*) c FROM visit_records WHERE player_id=?'),
+    ('operation_tasks', 'SELECT COUNT(*) c FROM operation_tasks WHERE player_id=?'),
+    ('player_relationships', 'SELECT COUNT(*) c FROM player_relationships WHERE player_a_id=? OR player_b_id=?'),
+    ('player_pair_stats', 'SELECT COUNT(*) c FROM player_pair_stats WHERE player_a_id=? OR player_b_id=?'),
+    ('session_feedback', 'SELECT COUNT(*) c FROM session_feedback WHERE session_id IN (SELECT session_id FROM session_players WHERE player_id=?)'),
+    ('payments', 'SELECT COUNT(*) c FROM payments WHERE session_player_id IN (SELECT id FROM session_players WHERE player_id=?)'),
+    ('staff', 'SELECT COUNT(*) c FROM staff WHERE player_id=?'),
+]
+
+
+def _player_history_refs(db, player_id):
+    """返回该玩家存在的所有历史引用 [{table, count}]，空列表 = 可安全删除。"""
+    refs = []
+    for label, sql in PLAYER_HISTORY_REF_QUERIES:
+        # 这些查询中的每个 ? 都是 player_id 绑定
+        params = [player_id] * sql.count('?')
+        n = db.execute(sql, params).fetchone()['c'] or 0
+        if n:
+            refs.append({'table': label, 'count': n})
+    return refs
 
 
 @app.route('/api/players', methods=['POST'])
@@ -1282,6 +1352,68 @@ def api_update_player(player_id):
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/players/<int:player_id>/archive', methods=['POST'])
+@role_required('players')
+def api_archive_player(player_id):
+    """归档玩家：status='archived' + archived_at + archive_reason。
+    不删除任何历史数据；历史场次/消费/会员/关系全部保留。"""
+    db = g.db
+    p = db.execute('SELECT * FROM players WHERE id=?', [player_id]).fetchone()
+    if not p:
+        return jsonify({'error': '玩家不存在'}), 404
+    if (p['status'] or 'active') == 'archived':
+        return jsonify({'error': '玩家已归档'}), 400
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or '').strip()
+    if len(reason) > 100:
+        reason = reason[:100]
+    now = datetime.now().isoformat()
+    db.execute(
+        "UPDATE players SET status='archived', archived_at=?, archive_reason=?, updated_at=? WHERE id=?",
+        [now, reason or None, now, player_id]
+    )
+    db.commit()
+    return jsonify({'status': 'ok', 'id': player_id, 'archived_at': now})
+
+
+@app.route('/api/players/<int:player_id>/restore', methods=['POST'])
+@role_required('players')
+def api_restore_player(player_id):
+    """恢复归档玩家：status='active'，清空 archived_at / archive_reason。"""
+    db = g.db
+    p = db.execute('SELECT * FROM players WHERE id=?', [player_id]).fetchone()
+    if not p:
+        return jsonify({'error': '玩家不存在'}), 404
+    if (p['status'] or 'active') != 'archived':
+        return jsonify({'error': '玩家未归档'}), 400
+    now = datetime.now().isoformat()
+    db.execute(
+        "UPDATE players SET status='active', archived_at=NULL, archive_reason=NULL, updated_at=? WHERE id=?",
+        [now, player_id]
+    )
+    db.commit()
+    return jsonify({'status': 'ok', 'id': player_id})
+
+
+@app.route('/api/players/<int:player_id>', methods=['DELETE'])
+@role_required('players')
+def api_delete_player(player_id):
+    """永久删除玩家：仅 admin，且必须先通过服务端引用检查。
+    存在任何历史引用（场次/消费/会员/关系/任务/反馈/支付等）→ 409 PLAYER_HAS_HISTORY。"""
+    if session.get('role') != 'admin':
+        return jsonify({'error': '权限不足'}), 403
+    db = g.db
+    p = db.execute('SELECT id FROM players WHERE id=?', [player_id]).fetchone()
+    if not p:
+        return jsonify({'error': '玩家不存在'}), 404
+    refs = _player_history_refs(db, player_id)
+    if refs:
+        return jsonify({'error': 'PLAYER_HAS_HISTORY', 'refs': refs}), 409
+    db.execute('DELETE FROM players WHERE id=?', [player_id])
+    db.commit()
+    return jsonify({'status': 'ok', 'id': player_id})
+
+
 @app.route('/api/players/search')
 @login_required
 def api_search_players():
@@ -1290,7 +1422,7 @@ def api_search_players():
     if not name:
         return jsonify([])
     rows = db.execute(
-        'SELECT id, name, phone, dan, is_member, member_id FROM players WHERE name LIKE ? LIMIT 10',
+        "SELECT id, name, phone, dan, is_member, member_id FROM players WHERE (status IS NULL OR status='active') AND name LIKE ? LIMIT 10",
         [f'%{name}%']
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -1301,7 +1433,7 @@ def api_search_players():
 def api_non_member_players():
     db = g.db
     rows = db.execute(
-        "SELECT id, name, phone, dan FROM players WHERE is_member=0 OR is_member IS NULL ORDER BY total_visits DESC, name"
+        "SELECT id, name, phone, dan FROM players WHERE (status IS NULL OR status='active') AND (is_member=0 OR is_member IS NULL) ORDER BY total_visits DESC, name"
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 

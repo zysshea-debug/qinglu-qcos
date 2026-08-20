@@ -216,8 +216,8 @@ def _score_initiative(sig, today):
 
 
 def compute_initiative(db):
-    """重算所有玩家主动性，写回 players 表。"""
-    players = db.execute('SELECT * FROM players').fetchall()
+    """重算所有活跃玩家主动性，写回 players 表（归档玩家不参与）。"""
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     today = _today()
     results = []
     for p in players:
@@ -257,8 +257,8 @@ def _infer_table_style(sig):
 
 
 def compute_table_style(db):
-    """重算所有玩家局型偏好，写回 players（人工已设置的保留，不覆盖）。"""
-    players = db.execute('SELECT * FROM players').fetchall()
+    """重算所有活跃玩家局型偏好，写回 players（人工已设置的保留，不覆盖）。"""
+    players = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     results = []
     for p in players:
         p = dict(p)
@@ -568,7 +568,8 @@ def match_table(db, table_style, existing_ids, missing_count, stake=None):
         nm = db.execute('SELECT name FROM players WHERE id=?', [eid]).fetchone()
         names[eid] = nm['name'] if nm else f'#{eid}'
 
-    candidates = db.execute('SELECT * FROM players').fetchall()
+    # 组局候选：仅活跃玩家（归档玩家不进入候选）
+    candidates = db.execute("SELECT * FROM players WHERE (status IS NULL OR status='active')").fetchall()
     recommended = []
     not_recommended = []
 

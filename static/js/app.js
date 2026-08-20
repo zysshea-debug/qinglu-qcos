@@ -387,13 +387,23 @@ async function openPlayerCheckout(sessionId, spId) {
                 checkoutData.available_discounts.map(d => `<button class="btn btn-sm btn-outline-success mt-1" onclick="selectDiscount(${d.id}, '${d.discount_type}', ${d.max_deduction})">${d.type_label} (上限¥${d.max_deduction})</button>`).join(' ');
         }
 
-        // 会员信息
+        // 会员信息（每次打开先清空旧状态，仅依据当前 preview 重新渲染，杜绝跨玩家串号）
         const memberInfo = document.getElementById('memberPayInfo');
+        const payMember = document.getElementById('payMember');
         if (checkoutData.member_info) {
-            memberInfo.classList.remove('d-none');
+            memberInfo.classList.remove('d-none', 'alert-secondary');
+            memberInfo.classList.add('alert-info');
             memberInfo.innerHTML = `<i class="bi bi-credit-card-2-front"></i> ${checkoutData.player_name} 会员余额: <strong>${money(checkoutData.member_info.balance)}</strong>`;
+            // 余额>0 才可选用会员余额支付；余额=0 禁用
+            payMember.disabled = checkoutData.member_info.balance <= 0;
+            if (payMember.disabled && payMember.checked) document.getElementById('payScanWechat').checked = true;
         } else {
-            memberInfo.classList.add('d-none');
+            memberInfo.classList.remove('d-none', 'alert-info');
+            memberInfo.classList.add('alert-secondary');
+            memberInfo.innerHTML = `<span class="text-muted">非会员</span>`;
+            // 非会员：隐藏/禁用会员余额支付
+            payMember.disabled = true;
+            if (payMember.checked) document.getElementById('payScanWechat').checked = true;
         }
 
         updateCheckoutTotal();
@@ -1299,24 +1309,32 @@ async function fetchPlayers() {
     const activity = document.getElementById('filterActivity').value;
     const ptype = document.getElementById('filterType').value;
     const organizer = document.getElementById('filterOrganizer').value;
+    const status = document.getElementById('filterStatus').value;
     const params = new URLSearchParams();
     if (search) params.set('search', search);
     if (activity) params.set('activity', activity);
     if (ptype) params.set('type', ptype);
     if (organizer) params.set('organizer', organizer);
+    if (status) params.set('status', status);
     try {
         const res = await fetch(`/api/players${params.toString() ? '?' + params : ''}`);
         const players = await res.json();
         renderPlayers(players);
-        updatePlayerStats(players);
+        fetchPlayerStats();
     } catch (e) { console.error(e); }
 }
 
-function updatePlayerStats(players) {
-    document.getElementById('statTotal').textContent = players.length;
-    document.getElementById('statHigh').textContent = players.filter(p => p.activity_level === '高').length;
-    document.getElementById('statCompetitive').textContent = players.filter(p => p.player_type === '竞技').length;
-    document.getElementById('statOrganizer').textContent = players.filter(p => p.is_organizer).length;
+// 顶部统计：归档玩家不进入活跃指标，但单独展示"已归档 X"
+async function fetchPlayerStats() {
+    try {
+        const res = await fetch('/api/players/stats');
+        const s = await res.json();
+        document.getElementById('statTotal').textContent = s.total_active;
+        document.getElementById('statArchived').textContent = `已归档 ${s.total_archived}`;
+        document.getElementById('statHigh').textContent = s.high_active;
+        document.getElementById('statCompetitive').textContent = s.competitive_active;
+        document.getElementById('statOrganizer').textContent = s.organizer_active;
+    } catch (e) { console.error(e); }
 }
 
 function activityBadge(level) {
@@ -1338,8 +1356,9 @@ function typeBadge(type) {
 function renderPlayers(players) {
     const tbody = document.getElementById('playerList');
     if (players.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">暂无玩家</td></tr>'; return; }
+    const isAdmin = window.CURRENT_USER_ROLE === 'admin';
     tbody.innerHTML = players.map(p => `<tr style="cursor:pointer" onclick="showPlayerDetail(${p.id})">
-        <td class="fw-bold">${p.name}${p.preferred_name ? `<br><small class="text-muted">${p.preferred_name}</small>` : ''}</td>
+        <td class="fw-bold">${p.name}${p.status === 'archived' ? ' <span class="badge bg-secondary">已归档</span>' : ''}${p.preferred_name ? `<br><small class="text-muted">${p.preferred_name}</small>` : ''}</td>
         <td>${activityBadge(p.activity_level)}</td>
         <td>${typeBadge(p.player_type)}</td>
         <td>${p.total_visits || 0}次</td>
@@ -1347,8 +1366,71 @@ function renderPlayers(players) {
         <td>${p.is_organizer ? '<i class="bi bi-check-circle-fill text-success"></i>' : '-'}</td>
         <td>${p.phone || '-'}</td>
         <td>${p.wechat || '-'}</td>
-        <td onclick="event.stopPropagation()"><button class="btn btn-sm btn-outline-primary" onclick="openPlayerModal(${p.id})">编辑</button></td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap">
+            <button class="btn btn-sm btn-outline-primary" onclick="openPlayerModal(${p.id})">编辑</button>
+            ${p.status === 'archived'
+                ? `<button class="btn btn-sm btn-outline-success" onclick="restorePlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')">恢复</button>`
+                : `<button class="btn btn-sm btn-outline-warning" onclick="archivePlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')">归档</button>`}
+            ${isAdmin ? `<button class="btn btn-sm btn-outline-danger" onclick="permanentlyDeletePlayer(${p.id}, '${p.name.replace(/'/g, "\\'")}')">永久删除</button>` : ''}
+        </td>
     </tr>`).join('');
+}
+
+// 归档玩家（弹窗选原因）
+let pendingArchiveId = null;
+function archivePlayer(id, name) {
+    pendingArchiveId = id;
+    document.getElementById('archivePlayerName').textContent = name;
+    document.getElementById('archiveReasonSelect').value = '';
+    new bootstrap.Modal(document.getElementById('archiveReasonModal')).show();
+}
+
+async function confirmArchivePlayer() {
+    const id = pendingArchiveId;
+    if (!id) return;
+    const reason = document.getElementById('archiveReasonSelect').value;
+    try {
+        const res = await fetch(`/api/players/${id}/archive`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({reason})
+        });
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('archiveReasonModal')).hide();
+            fetchPlayers();
+        } else {
+            const err = await res.json().catch(() => ({}));
+            alert(err.error || '归档失败');
+        }
+    } catch (e) { alert('网络错误'); }
+}
+
+// 恢复归档玩家
+async function restorePlayer(id, name) {
+    if (!confirm(`确认恢复玩家 ${name}？恢复后重新进入活跃体系。`)) return;
+    try {
+        const res = await fetch(`/api/players/${id}/restore`, {method: 'POST'});
+        if (res.ok) { fetchPlayers(); }
+        else { const err = await res.json().catch(() => ({})); alert(err.error || '恢复失败'); }
+    } catch (e) { alert('网络错误'); }
+}
+
+// 永久删除（仅管理员可见按钮，后端再做权限+引用双重校验）
+async function permanentlyDeletePlayer(id, name) {
+    if (!confirm(`⚠️ 永久删除玩家 ${name}？\n\n仅当该玩家从未有历史场次/消费/会员/关系数据时才允许删除，且不可恢复。\n如存在任何历史数据请改用「归档」。`)) return;
+    if (!confirm(`再次确认：永久删除 ${name} ？此操作不可撤销。`)) return;
+    try {
+        const res = await fetch(`/api/players/${id}`, {method: 'DELETE'});
+        if (res.ok) { fetchPlayers(); }
+        else {
+            const err = await res.json().catch(() => ({}));
+            if (err.error === 'PLAYER_HAS_HISTORY') {
+                alert('该玩家存在历史场次/消费/关系数据，不能永久删除。\n请使用「归档」。');
+            } else {
+                alert(err.error || '删除失败');
+            }
+        }
+    } catch (e) { alert('网络错误'); }
 }
 
 async function showPlayerDetail(id) {
@@ -1374,7 +1456,7 @@ async function showPlayerDetail(id) {
                     <div class="card-body">
                         <h6><i class="bi bi-person"></i> 基本信息</h6>
                         <table class="table table-sm table-borderless">
-                            <tr><td class="text-muted" style="width:80px">昵称</td><td class="fw-bold">${p.name}</td></tr>
+                            <tr><td class="text-muted" style="width:80px">昵称</td><td class="fw-bold">${p.name}${p.status === 'archived' ? ' <span class="badge bg-secondary">已归档</span>' : ''}</td></tr>
                             <tr><td class="text-muted">真实姓名</td><td>${p.real_name || '-'}</td></tr>
                             <tr><td class="text-muted">称呼</td><td>${p.preferred_name || '-'}</td></tr>
                             <tr><td class="text-muted">性别</td><td>${p.gender || '-'}</td></tr>

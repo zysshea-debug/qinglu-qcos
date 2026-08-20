@@ -260,19 +260,21 @@ def get_operation_review(db, date_str=None):
         avg_quality = 0
         conflict_fb = 0
 
-    # 新客：当天首局且历史仅此一次
+    # 新客：当天首局且历史仅此一次（仅统计活跃玩家）
     new_players = db.execute(
         '''SELECT p.id, p.name FROM players p
-           WHERE (SELECT MIN(date(s.start_time)) FROM session_players sp
+           WHERE (status IS NULL OR status='active')
+             AND (SELECT MIN(date(s.start_time)) FROM session_players sp
                   JOIN sessions s ON sp.session_id=s.id WHERE sp.player_id=p.id) = ?''',
         [date_str]
     ).fetchall()
-    # 流失客户：近期(>=30天)无到店 或 等级D
+    # 流失客户：近期(>=30天)无到店 或 等级D（仅统计活跃玩家）
     d30 = (_parse_dt(date_str) - timedelta(days=30)).isoformat() if _parse_dt(date_str) else ''
     churned = db.execute(
         '''SELECT id, name, customer_level, last_visit FROM players
-           WHERE customer_level = 'D'
-              OR (last_visit IS NOT NULL AND last_visit < ?)''',
+           WHERE (status IS NULL OR status='active')
+             AND (customer_level = 'D'
+              OR (last_visit IS NOT NULL AND last_visit < ?))''',
         [d30]
     ).fetchall()
 
@@ -328,6 +330,10 @@ def generate_feedback_review_tasks(db):
     for r in risks:
         if r['negative_count'] < 2:
             continue
+        # 归档玩家不生成运营任务
+        a_st = db.execute('SELECT status FROM players WHERE id=?', [r['player_a_id']]).fetchone()
+        if a_st and (a_st['status'] or 'active') == 'archived':
+            continue
         # 近14天有同桌才值得关注
         last = db.execute(
             '''SELECT MAX(date(s.start_time)) FROM session_players sp1
@@ -351,10 +357,11 @@ def generate_feedback_review_tasks(db):
         )
         created += 1
 
-    # 2) 新客首次体验良好
+    # 2) 新客首次体验良好（仅活跃玩家）
     newp = db.execute(
         '''SELECT p.id, p.name FROM players p
-           WHERE (SELECT COUNT(DISTINCT sp.session_id) FROM session_players sp
+           WHERE (status IS NULL OR status='active')
+             AND (SELECT COUNT(DISTINCT sp.session_id) FROM session_players sp
                   JOIN sessions s ON sp.session_id=s.id WHERE sp.player_id=p.id) = 1'''
     ).fetchall()
     for p in newp:
