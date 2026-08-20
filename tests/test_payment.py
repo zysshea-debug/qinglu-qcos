@@ -67,12 +67,18 @@ def start_session(machine_id, player_name, player_id, start_iso):
     })
     data = r.get_json()
     sid = data['id']
-    # 取该台桌首个在玩玩家的 id，金额用 fee+product_total（与结账口径一致）
+    # 取该台桌首个在玩玩家
     r2 = client.get(f'/api/sessions/{sid}/preview')
-    prev = r2.get_json()
-    sp = prev['players'][0]
+    sp = r2.get_json()['players'][0]
+    sp_id = sp['id']
+    # 金额必须取「单人预览」，与单人结账（/players/<sp_id>/checkout）完全同口径：
+    # 同样的 start_time、同样的 is_overnight（均回退到 session_players 表值）、
+    # 同样的 end_time（注入的固定时钟）。若取整台预览的 fee（默认 is_overnight=True），
+    # 在通宵时段会与单人结账的正常费率产生分歧，导致支付金额校验失败。
+    r3 = client.get(f'/api/sessions/{sid}/players/{sp_id}/preview')
+    prev = r3.get_json()
     amount = round((prev.get('fee') or 0) + (prev.get('product_total') or 0), 2)
-    return sid, sp['id'], amount
+    return sid, sp_id, amount
 
 # ---------- 0. 初始化 ----------
 init_db()
@@ -115,9 +121,13 @@ else:
     payment_ref = None
 
 # ---------- 3. 凭确认流水结账成功 ----------
+# 注意: 不显式传 is_overnight，让 checkout 与 preview 一样回退到
+# session_players 表里的值（开台时按时段自动判定），保证两侧费率口径一致。
+# 此前测试显式传 is_overnight=False，在通宵时段（00:00-08:00）会与 preview
+# 的通宵包夜费率产生分歧，导致「支付金额与结账金额不一致」。
 r = client.post(f'/api/sessions/{sid}/players/{spid}/checkout', json={
     'payment_method': 'scan_wechat', 'product_total': 0,
-    'start_time': start, 'is_overnight': False,
+    'start_time': start,
     'manual_discount_type': None, 'manual_discount_value': 0,
     'payment_ref': payment_ref
 })

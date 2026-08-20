@@ -6,6 +6,7 @@ qcos.db.bak*
 
 backups/
 logs/
+runtime/
 exports/
 analytics_examples/
 
