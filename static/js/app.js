@@ -108,9 +108,13 @@ function renderActiveCard(m) {
             ? `<span class="badge bg-success">游戏中</span>`
             : `<span class="badge bg-secondary">已结账</span>`;
         const feeDisplay = isPlaying ? money(p.current_fee) : money(p.grand_total || p.fee || 0);
-        const productBadge = p.product_total > 0 ? `<span class="badge bg-warning text-dark">+${money(p.product_total)}</span>` : '';
+        const consumeAmt = p.unsettled_product_total || 0;
+        const productBadge = consumeAmt > 0 ? `<span class="badge bg-warning text-dark">消费 ${money(consumeAmt)}</span>` : '';
         const checkoutBtn = isPlaying
-            ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();openPlayerCheckout(${s.id}, ${p.id})"><i class="bi bi-cash-coin"></i> 结账</button>`
+            ? `<div class="btn-group btn-group-sm">
+                 <button class="btn btn-outline-primary" onclick="event.stopPropagation();openPlayerConsumption(${s.id}, ${p.id}, '${escapeJs(p.player_name)}', '${escapeJs(m.name)}')"><i class="bi bi-bag"></i> 消费</button>
+                 <button class="btn btn-danger" onclick="event.stopPropagation();openPlayerCheckout(${s.id}, ${p.id})"><i class="bi bi-cash-coin"></i> 结账</button>
+               </div>`
             : `<span class="text-muted small">${p.payment_method ? PAYMENT_LABELS[p.payment_method] || p.payment_method : ''}</span>`;
 
         return `<div class="player-tile ${isPlaying ? '' : 'checked-out'}" ${isPlaying ? `onclick="openPlayerCheckout(${s.id}, ${p.id})"` : ''}>
@@ -361,15 +365,17 @@ async function openPlayerCheckout(sessionId, spId) {
         const productSelect = document.getElementById('productSelect');
         productSelect.innerHTML = '<option value="">选择商品...</option>' + allProducts.map(p => `<option value="${p.id}" data-price="${p.price}" data-name="${p.name}">${p.name} - ${money(p.price)}</option>`).join('');
 
-        // 已有商品（该玩家的）
+        // 已有商品（该玩家中已挂账未结算的，标记 persisted 以便删除时同步删库）
         cart = (checkoutData.product_sales || []).map(ps => ({
+            id: ps.id,
             product_id: ps.product_id,
             name: ps.product_name,
             price: ps.price,
             qty: ps.quantity,
             total: ps.total,
             is_custom: ps.is_custom,
-            custom_category: ps.custom_category
+            custom_category: ps.custom_category,
+            persisted: true
         }));
         renderCart();
 
@@ -711,7 +717,18 @@ function addCustomProductToCart() {
     updateCheckoutTotal();
 }
 
-function removeCartItem(idx) {
+async function removeCartItem(idx) {
+    const item = cart[idx];
+    if (item && item.persisted) {
+        try {
+            const res = await fetch(`/api/product-sales/${item.id}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const e = await res.json().catch(() => ({}));
+                alert(e.error || '删除失败');
+                return;
+            }
+        } catch (e) { alert('网络错误，删除未成功'); return; }
+    }
     cart.splice(idx, 1);
     renderCart();
     updateCheckoutTotal();
@@ -722,7 +739,7 @@ function renderCart() {
     if (cart.length === 0) { el.innerHTML = '<small class="text-muted">无商品消费</small>'; document.getElementById('cartTotal').innerHTML = ''; return; }
     el.innerHTML = cart.map((c, i) => `
         <div class="cart-item">
-            <span class="ci-name">${c.name}${c.is_custom ? ' <span class="badge bg-secondary">无码</span>' : ''}</span>
+            <span class="ci-name">${c.name}${c.is_custom ? ' <span class="badge bg-secondary">无码</span>' : ''}${c.persisted ? ' <span class="badge bg-info">已挂账</span>' : ''}</span>
             <span class="ci-qty">x${c.qty}</span>
             <span class="ci-total">${money(c.total)}</span>
             <button class="btn btn-sm btn-link text-danger p-0" onclick="removeCartItem(${i})"><i class="bi bi-x"></i></button>
@@ -730,6 +747,122 @@ function renderCart() {
     `).join('');
     const cartTotal = cart.reduce((s, c) => s + c.total, 0);
     document.getElementById('cartTotal').innerHTML = `<small class="text-muted">商品小计: <strong>${money(cartTotal)}</strong></small>`;
+}
+
+// ===== 游戏中玩家消费挂账 =====
+let consumeSessionId = null, consumeSpId = null;
+
+async function openPlayerConsumption(sessionId, spId, playerName, machineName) {
+    consumeSessionId = sessionId;
+    consumeSpId = spId;
+    document.getElementById('consumePlayerName').textContent = playerName;
+    document.getElementById('consumeMachineName').textContent = machineName;
+    const sel = document.getElementById('consumeProductSelect');
+    sel.innerHTML = '<option value="">选择商品...</option>' + allProducts.map(p => `<option value="${p.id}" data-price="${p.price}" data-name="${p.name}">${p.name} - ${money(p.price)}</option>`).join('');
+    document.getElementById('consumeQty').value = 1;
+    document.getElementById('consumeToast').style.display = 'none';
+    document.getElementById('consumeCustomRow').style.display = 'none';
+    await loadConsumptionList();
+    new bootstrap.Modal(document.getElementById('playerConsumptionModal')).show();
+}
+
+async function loadConsumptionList() {
+    try {
+        const res = await fetch(`/api/sessions/${consumeSessionId}/players/${consumeSpId}/consumption`);
+        const data = await res.json();
+        const el = document.getElementById('consumeList');
+        if (!data.items || data.items.length === 0) {
+            el.innerHTML = '<small class="text-muted">暂无挂账消费</small>';
+        } else {
+            el.innerHTML = data.items.map(it => `
+                <div class="cart-item">
+                    <span class="ci-name">${it.product_name}${it.is_custom ? ' <span class="badge bg-secondary">无码</span>' : ''}</span>
+                    <span class="ci-qty">x${it.quantity}</span>
+                    <span class="ci-total">${money(it.total)}</span>
+                    <button class="btn btn-sm btn-link text-danger p-0" onclick="deleteConsumption(${it.id})"><i class="bi bi-x"></i></button>
+                </div>`).join('');
+        }
+        document.getElementById('consumeTotal').innerHTML = (data.items && data.items.length)
+            ? `<small class="text-muted">挂账合计: <strong>${money(data.total)}</strong></small>` : '';
+    } catch (e) { console.error(e); }
+}
+
+async function addConsumeProduct() {
+    const sel = document.getElementById('consumeProductSelect');
+    const qty = parseInt(document.getElementById('consumeQty').value) || 1;
+    if (!sel.value) { alert('请选择商品'); return; }
+    const option = sel.selectedOptions[0];
+    const payload = {
+        product_id: parseInt(sel.value),
+        quantity: qty,
+        session_id: consumeSessionId,
+        session_player_id: consumeSpId
+    };
+    try {
+        const res = await fetch('/api/products/sell', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert('添加失败: ' + (err.error || res.statusText));
+            return;
+        }
+        showConsumeToast(`消费已挂账: ${option.dataset.name} x${qty}`);
+        sel.value = '';
+        document.getElementById('consumeQty').value = 1;
+        await loadConsumptionList();
+    } catch (e) { alert('网络错误，挂账未成功'); }
+}
+
+function toggleConsumeCustom() {
+    const row = document.getElementById('consumeCustomRow');
+    row.style.display = row.style.display === 'none' ? 'block' : 'none';
+    document.getElementById('consumeCustomName').value = '';
+    document.getElementById('consumeCustomPrice').value = '';
+    document.getElementById('consumeCustomQty').value = 1;
+    document.getElementById('consumeCustomCategory').value = 'other';
+}
+
+async function addConsumeCustomProduct() {
+    const name = document.getElementById('consumeCustomName').value.trim();
+    const category = document.getElementById('consumeCustomCategory').value;
+    const price = parseFloat(document.getElementById('consumeCustomPrice').value) || 0;
+    const qty = parseInt(document.getElementById('consumeCustomQty').value) || 1;
+    if (!name || price <= 0) { alert('请输入无码商品名称和单价'); return; }
+    const payload = {
+        is_custom: true, custom_name: name, custom_category: category, price, quantity: qty,
+        session_id: consumeSessionId, session_player_id: consumeSpId
+    };
+    try {
+        const res = await fetch('/api/products/sell', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert('添加失败: ' + (err.error || res.statusText));
+            return;
+        }
+        showConsumeToast(`消费已挂账: ${name} x${qty}`);
+        toggleConsumeCustom();
+        await loadConsumptionList();
+    } catch (e) { alert('网络错误，挂账未成功'); }
+}
+
+async function deleteConsumption(id) {
+    if (!confirm('确认删除该挂账消费？')) return;
+    try {
+        const res = await fetch(`/api/product-sales/${id}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { alert(data.error || '删除失败'); return; }
+        await loadConsumptionList();
+    } catch (e) { alert('网络错误，删除未成功'); }
+}
+
+function showConsumeToast(msg) {
+    const el = document.getElementById('consumeToast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 2500);
 }
 
 async function searchDiscounts() {

@@ -303,6 +303,12 @@ def api_machines():
                     'SELECT SUM(total) as total FROM product_sales WHERE session_player_id=?', [p['id']]
                 ).fetchone()
                 p['product_total'] = p_products['total'] or 0
+                # 该玩家"游戏中未结算挂账"合计（用于台桌总览消费提示）
+                p_unsettled = db.execute(
+                    "SELECT SUM(total) as total FROM product_sales WHERE session_player_id=? AND status='UNSETTLED'",
+                    [p['id']]
+                ).fetchone()
+                p['unsettled_product_total'] = p_unsettled['total'] or 0
                 player_list.append(p)
 
             sess['players'] = player_list
@@ -517,11 +523,11 @@ def api_close_session(session_id):
     if discount_id:
         db.execute('UPDATE discounts SET used=1, used_session_id=? WHERE id=?', [session_id, discount_id])
 
-    # 更新商品销售记录的支付方式和会员ID
+    # 更新商品销售记录的支付方式和会员ID，并将本桌未结算挂账置为已结算
     if product_total > 0:
         db.execute(
-            'UPDATE product_sales SET payment_method=?, member_id=? WHERE session_id=? AND payment_method IS NULL',
-            [payment_method, member_id, session_id]
+            "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=? WHERE session_id=? AND status='UNSETTLED'",
+            [datetime.now().isoformat(), payment_method, member_id, session_id]
         )
 
     db.commit()
@@ -687,9 +693,9 @@ def api_player_preview(session_id, sp_id):
         machine_type, start_time, end_time, settings, is_overnight=is_overnight
     )
 
-    # 该玩家的商品
+    # 该玩家的商品（仅未结算的挂账消费，已结算的不重复带入结账）
     product_sales = db.execute(
-        'SELECT * FROM product_sales WHERE session_player_id=? ORDER BY created_at', [sp_id]
+        "SELECT * FROM product_sales WHERE session_player_id=? AND status='UNSETTLED' ORDER BY created_at", [sp_id]
     ).fetchall()
     sp['product_sales'] = [dict(ps) for ps in product_sales]
     sp['product_total'] = sum(ps['total'] for ps in product_sales)
@@ -972,12 +978,11 @@ def api_player_checkout(session_id, sp_id):
     if discount_id:
         db.execute('UPDATE discounts SET used=1, used_session_id=? WHERE id=?', [session_id, discount_id])
 
-    # 更新商品销售的支付方式和会员
-    if product_total > 0:
-        db.execute(
-            'UPDATE product_sales SET payment_method=?, member_id=? WHERE session_player_id=? AND payment_method IS NULL',
-            [payment_method, member_id, sp_id]
-        )
+    # 结算该玩家本场未结算挂账（置为已结算，防止重复计费）
+    db.execute(
+        "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=? WHERE session_player_id=? AND status='UNSETTLED'",
+        [datetime.now().isoformat(), payment_method, member_id, sp_id]
+    )
 
     # 检查是否所有人都已结账
     remaining = db.execute(
@@ -1072,6 +1077,24 @@ def api_sell_product():
     data = request.json
     db = g.db
 
+    session_id = data.get('session_id')
+    session_player_id = data.get('session_player_id')
+    member_id = data.get('member_id')
+    player_id = data.get('player_id')
+    # 解析消费归属的玩家：优先显式传入，否则从 session_player 反查
+    if session_player_id:
+        sp_row = db.execute('SELECT player_id FROM session_players WHERE id=?', [session_player_id]).fetchone()
+        if sp_row and sp_row['player_id']:
+            player_id = sp_row['player_id']
+    # 结算状态：挂账到玩家场次 = 未结算(UNSETTLED)；纯柜台即时售卖(无场次玩家) = 立即结算(SETTLED)
+    if session_player_id:
+        sale_status = 'UNSETTLED'
+        settled_at = None
+    else:
+        sale_status = 'SETTLED'
+        settled_at = datetime.now().isoformat()
+
+    now = datetime.now().isoformat()
     is_custom = data.get('is_custom', False)
     if is_custom or not data.get('product_id'):
         # 无码商品
@@ -1082,14 +1105,11 @@ def api_sell_product():
             return jsonify({'error': '请输入无码商品名称和单价'}), 400
         qty = data.get('quantity', 1)
         total = round(price * qty, 2)
-        session_id = data.get('session_id')
-        session_player_id = data.get('session_player_id')
-        member_id = data.get('member_id')
 
         db.execute(
-            'INSERT INTO product_sales (session_id, session_player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [session_id, session_player_id, None, custom_name, custom_category, price, qty, total,
-             1, custom_category, data.get('payment_method'), member_id, datetime.now().isoformat()]
+            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [session_id, session_player_id, player_id, None, custom_name, custom_category, price, qty, total,
+             1, custom_category, data.get('payment_method'), member_id, sale_status, settled_at, now]
         )
     else:
         product = db.execute('SELECT * FROM products WHERE id=?', [data['product_id']]).fetchone()
@@ -1097,19 +1117,18 @@ def api_sell_product():
             return jsonify({'error': '商品不存在'}), 404
         qty = data.get('quantity', 1)
         total = round(product['price'] * qty, 2)
-        session_id = data.get('session_id')
-        session_player_id = data.get('session_player_id')
-        member_id = data.get('member_id')
 
         db.execute(
-            'INSERT INTO product_sales (session_id, session_player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [session_id, session_player_id, product['id'], product['name'], product['category'], product['price'], qty, total,
-             0, None, data.get('payment_method'), member_id, datetime.now().isoformat()]
+            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [session_id, session_player_id, player_id, product['id'], product['name'], product['category'], product['price'], qty, total,
+             0, None, data.get('payment_method'), member_id, sale_status, settled_at, now]
         )
 
         # 更新库存
         if product['stock'] >= 0:
             db.execute('UPDATE products SET stock = stock - ? WHERE id=?', [qty, product['id']])
+
+    sale_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
 
     # 会员扣款
     if member_id:
@@ -1122,7 +1141,45 @@ def api_sell_product():
                        [total, total, datetime.now().isoformat(), member_id])
 
     db.commit()
-    return jsonify({'status': 'ok', 'total': total}), 201
+    return jsonify({'status': 'ok', 'total': total, 'sale_id': sale_id}), 201
+
+
+@app.route('/api/sessions/<int:session_id>/players/<int:sp_id>/consumption', methods=['GET'])
+@role_required('dashboard')
+def api_player_consumption(session_id, sp_id):
+    """查询某玩家本场未结算挂账消费（游戏中消费入口使用）"""
+    db = g.db
+    sp = db.execute('SELECT * FROM session_players WHERE id=? AND session_id=?', [sp_id, session_id]).fetchone()
+    if not sp:
+        return jsonify({'error': '玩家不存在'}), 404
+    rows = db.execute(
+        "SELECT id, product_name, category, price, quantity, total, is_custom, custom_category, created_at "
+        "FROM product_sales WHERE session_player_id=? AND status='UNSETTLED' ORDER BY created_at",
+        [sp_id]
+    ).fetchall()
+    total = sum(r['total'] for r in rows)
+    return jsonify({'items': [dict(r) for r in rows], 'total': round(total, 2)})
+
+
+@app.route('/api/product-sales/<int:sale_id>', methods=['DELETE'])
+@role_required('dashboard')
+def api_delete_product_sale(sale_id):
+    """删除一条消费记录。仅未结算(UNSETTLED)可删；已结算(SETTLED)不可删。
+    删除未结算且有码商品时归还库存。"""
+    db = g.db
+    sale = db.execute('SELECT * FROM product_sales WHERE id=?', [sale_id]).fetchone()
+    if not sale:
+        return jsonify({'error': '记录不存在'}), 404
+    if sale['status'] == 'SETTLED':
+        return jsonify({'error': '已结算消费不能删除'}), 400
+    # 归还库存（仅当绑定了有码商品且库存可追踪）
+    if sale['product_id']:
+        prod = db.execute('SELECT stock FROM products WHERE id=?', [sale['product_id']]).fetchone()
+        if prod and prod['stock'] >= 0:
+            db.execute('UPDATE products SET stock = stock + ? WHERE id=?', [sale['quantity'], sale['product_id']])
+    db.execute('DELETE FROM product_sales WHERE id=?', [sale_id])
+    db.commit()
+    return jsonify({'status': 'ok'})
 
 
 @app.route('/api/products/sales')

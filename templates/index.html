@@ -286,6 +286,63 @@
         </div>
     </div>
 </div>
+
+<!-- 玩家游戏中消费挂账弹窗 -->
+<div class="modal fade" id="playerConsumptionModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-info text-white">
+                <h5 class="modal-title">玩家消费 - <span id="consumePlayerName"></span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3"><small class="text-muted">台桌</small> <span class="fw-bold" id="consumeMachineName"></span></div>
+
+                <label class="form-label fw-bold">添加有码商品</label>
+                <div class="row g-2 mb-2">
+                    <div class="col-6">
+                        <select class="form-select form-select-sm" id="consumeProductSelect"></select>
+                    </div>
+                    <div class="col-3">
+                        <input type="number" class="form-control form-control-sm" id="consumeQty" value="1" min="1">
+                    </div>
+                    <div class="col-3">
+                        <button class="btn btn-sm btn-primary w-100" onclick="addConsumeProduct()"><i class="bi bi-plus"></i> 添加</button>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="toggleConsumeCustom()"><i class="bi bi-pencil-square"></i> 无码商品</button>
+                </div>
+                <div id="consumeCustomRow" style="display:none" class="border rounded p-2 mb-3">
+                    <div class="row g-2">
+                        <div class="col-6"><input type="text" class="form-control form-control-sm" id="consumeCustomName" placeholder="商品名称"></div>
+                        <div class="col-6">
+                            <select class="form-select form-select-sm" id="consumeCustomCategory">
+                                <option value="drink">饮料</option>
+                                <option value="snack">零食</option>
+                                <option value="cigarette">烟</option>
+                                <option value="other">其他</option>
+                            </select>
+                        </div>
+                        <div class="col-6"><input type="number" class="form-control form-control-sm" id="consumeCustomPrice" placeholder="单价" min="0" step="0.1"></div>
+                        <div class="col-6 d-flex gap-1">
+                            <input type="number" class="form-control form-control-sm" id="consumeCustomQty" value="1" min="1">
+                            <button class="btn btn-sm btn-primary" onclick="addConsumeCustomProduct()">确认</button>
+                        </div>
+                    </div>
+                </div>
+
+                <label class="form-label fw-bold">当前挂账消费</label>
+                <div id="consumeList"></div>
+                <div class="text-end mt-2" id="consumeTotal"></div>
+                <div id="consumeToast" class="alert alert-success mt-2" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" onclick="fetchMachines()">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}

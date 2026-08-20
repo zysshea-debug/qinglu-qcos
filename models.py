@@ -606,6 +606,19 @@ def init_db():
         if 'product_sales_old' in [t['name'] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]:
             db.execute('DROP TABLE product_sales_old')
 
+    # ===== 迁移：product_sales 加玩家绑定 + 结算状态 =====
+    # 游戏中挂账到玩家场次 -> UNSETTLED；柜台即时售卖 -> SETTLED。
+    # 该结构用于"换店员不丢消费"与"防重复结算"。
+    ps_cols2 = db.execute('PRAGMA table_info(product_sales)').fetchall()
+    ps_col_names2 = [c['name'] for c in ps_cols2]
+    for col_name, col_type in [
+        ('player_id', 'INTEGER'),
+        ('status', "TEXT DEFAULT 'UNSETTLED'"),
+        ('settled_at', 'TEXT'),
+    ]:
+        if col_name not in ps_col_names2:
+            db.execute(f'ALTER TABLE product_sales ADD COLUMN {col_name} {col_type}')
+
     p_cols = db.execute('PRAGMA table_info(players)').fetchall()
     p_col_names = [c['name'] for c in p_cols]
     new_player_cols = {
