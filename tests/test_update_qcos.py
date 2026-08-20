@@ -303,6 +303,20 @@ def test_no_hardcoded_user_paths():
     ok("无硬编码用户路径，PROJECT_ROOT 基于 __file__")
 
 
+def test_start_server_uses_qcos_server():
+    """更新后新服务必须通过项目 venv 启动 qcos_server.py（不再 app.py）。"""
+    fake = FakeRunner()
+    update_qcos._start_server(runner=fake)
+    if not fake.calls:
+        return fail("未调用启动命令")
+    cmd = " ".join(fake.calls[-1])
+    if "qcos_server.py" not in cmd:
+        return fail("新服务应启动 qcos_server.py", cmd)
+    if "app.py" in cmd:
+        return fail("新服务不应直接启动 app.py", cmd)
+    ok("更新后新服务启动 qcos_server.py")
+
+
 if __name__ == "__main__":
     test_check_basic()
     test_requirements_changed()
@@ -316,5 +330,6 @@ if __name__ == "__main__":
     test_already_up_to_date()
     test_full_success()
     test_no_hardcoded_user_paths()
+    test_start_server_uses_qcos_server()
     print(f"\n结果: {PASS} 通过, {FAIL} 失败")
     sys.exit(1 if FAIL else 0)

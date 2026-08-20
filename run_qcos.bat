@@ -1,3 +1,9 @@
 @echo off
 cd /d "%~dp0"
-call "%~dp0启动.bat"
+
+if not exist "%~dp0venv\Scripts\python.exe" (
+    echo VENV_NOT_FOUND
+    exit /b 1
+)
+
+"%~dp0venv\Scripts\python.exe" "%~dp0qcos_server.py"
