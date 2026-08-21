@@ -6,12 +6,22 @@
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import update_qcos
+
+# _prepare() 会替换的模块级引用快照：测试退出时必须恢复原值，
+# 否则污染后续测试（历史根因：_start_server 等未恢复，导致
+# test_start_server_uses_qcos_server 拿到 lambda 而报"未调用启动命令"）。
+_PATCHED_ATTRS = (
+    "PROJECT_ROOT", "_backup", "_migrate", "_smoke",
+    "_stop_old_server", "_start_server", "_read_pid", "_health_check",
+)
+_ORIG_ATTRS = {name: getattr(update_qcos, name) for name in _PATCHED_ATTRS}
 
 PASS = 0
 FAIL = 0
@@ -136,8 +146,13 @@ def test_is_dirty():
 
 # ======================= run_update 流程测试 =======================
 
+@contextmanager
 def _prepare(project_root=None):
-    """构造测试环境: patch PROJECT_ROOT 与各外部函数，返回 fake runner。"""
+    """构造测试环境: patch PROJECT_ROOT 与各外部函数，产出 fake runner。
+
+    必须作为上下文管理器使用（with _prepare() as fake:）。退出时（含异常）
+    自动把 8 个被替换的模块级引用恢复为导入时快照，保证测试间隔离。
+    """
     if project_root is None:
         project_root = _make_project_root()
     update_qcos.PROJECT_ROOT = project_root
@@ -152,144 +167,148 @@ def _prepare(project_root=None):
     update_qcos._start_server = lambda runner=None: _FakeProc(8888)
     update_qcos._read_pid = lambda: 8888
     update_qcos._health_check = lambda port=5000, timeout_seconds=30, runner=None: True
-    return fake
+    try:
+        yield fake
+    finally:
+        for name, orig in _ORIG_ATTRS.items():
+            setattr(update_qcos, name, orig)
 
 
 def test_dirty_aborts():
     """dirty 工作区 -> 停止并报 LOCAL_CODE_CHANGES_DETECTED"""
-    fake = _prepare()
-    fake.results["git status --porcelain"] = _Result(0, " M app.py\n", "")
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("dirty 应中断", "未抛异常")
-    except RuntimeError as e:
-        if "LOCAL_CODE_CHANGES_DETECTED" not in str(e):
-            return fail("dirty 中断信息", str(e))
-        ok("dirty 工作区中断 (LOCAL_CODE_CHANGES_DETECTED)")
+    with _prepare() as fake:
+        fake.results["git status --porcelain"] = _Result(0, " M app.py\n", "")
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("dirty 应中断", "未抛异常")
+        except RuntimeError as e:
+            if "LOCAL_CODE_CHANGES_DETECTED" not in str(e):
+                return fail("dirty 中断信息", str(e))
+            ok("dirty 工作区中断 (LOCAL_CODE_CHANGES_DETECTED)")
 
 
 def test_backup_failure_aborts():
     """备份失败 -> UPDATE_ABORTED_BACKUP_FAILED 并停止"""
-    fake = _prepare()
-    def bad_backup(runner=None):
-        raise RuntimeError("backup boom")
-    update_qcos._backup = bad_backup
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("备份失败应中断", "未抛异常")
-    except RuntimeError as e:
-        if "UPDATE_ABORTED_BACKUP_FAILED" not in str(e):
-            return fail("备份失败中断信息", str(e))
-        ok("备份失败中断 (UPDATE_ABORTED_BACKUP_FAILED)")
+    with _prepare() as fake:
+        def bad_backup(runner=None):
+            raise RuntimeError("backup boom")
+        update_qcos._backup = bad_backup
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("备份失败应中断", "未抛异常")
+        except RuntimeError as e:
+            if "UPDATE_ABORTED_BACKUP_FAILED" not in str(e):
+                return fail("备份失败中断信息", str(e))
+            ok("备份失败中断 (UPDATE_ABORTED_BACKUP_FAILED)")
 
 
 def test_fetch_failure_aborts():
     """git fetch 失败 -> 停止"""
-    fake = _prepare()
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git fetch"] = _Result(1, "", "fatal: unable to access")
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("fetch 失败应中断", "未抛异常")
-    except RuntimeError as e:
-        if "git fetch 失败" not in str(e):
-            return fail("fetch 失败信息", str(e))
-        ok("git fetch 失败中断")
+    with _prepare() as fake:
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git fetch"] = _Result(1, "", "fatal: unable to access")
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("fetch 失败应中断", "未抛异常")
+        except RuntimeError as e:
+            if "git fetch 失败" not in str(e):
+                return fail("fetch 失败信息", str(e))
+            ok("git fetch 失败中断")
 
 
 def test_pull_failure_aborts():
     """git pull --ff-only 失败 -> 停止（不回滚）"""
-    fake = _prepare()
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
-    fake.results["git pull"] = _Result(1, "", "fatal: not fast-forward")
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("pull 失败应中断", "未抛异常")
-    except RuntimeError as e:
-        if "git pull --ff-only 失败" not in str(e):
-            return fail("pull 失败信息", str(e))
-        ok("git pull 失败中断（不做任何回滚）")
+    with _prepare() as fake:
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
+        fake.results["git pull"] = _Result(1, "", "fatal: not fast-forward")
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("pull 失败应中断", "未抛异常")
+        except RuntimeError as e:
+            if "git pull --ff-only 失败" not in str(e):
+                return fail("pull 失败信息", str(e))
+            ok("git pull 失败中断（不做任何回滚）")
 
 
 def test_smoke_failure_aborts():
     """smoke check 失败 -> 停止并报 UPDATE_FAILED_AFTER_PULL"""
-    fake = _prepare()
-    def bad_smoke(runner=None):
-        raise RuntimeError("SMOKE_CHECK_FAIL")
-    update_qcos._smoke = bad_smoke
-    # 已是最新（remote == HEAD）路径也会执行 smoke
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git rev-parse origin/main"] = _Result(0, "a" * 40 + "\n", "")
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("smoke 失败应中断", "未抛异常")
-    except RuntimeError as e:
-        if "UPDATE_FAILED_AFTER_PULL" not in str(e):
-            return fail("smoke 失败信息", str(e))
-        ok("smoke 失败中断 (UPDATE_FAILED_AFTER_PULL)")
+    with _prepare() as fake:
+        def bad_smoke(runner=None):
+            raise RuntimeError("SMOKE_CHECK_FAIL")
+        update_qcos._smoke = bad_smoke
+        # 已是最新（remote == HEAD）路径也会执行 smoke
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git rev-parse origin/main"] = _Result(0, "a" * 40 + "\n", "")
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("smoke 失败应中断", "未抛异常")
+        except RuntimeError as e:
+            if "UPDATE_FAILED_AFTER_PULL" not in str(e):
+                return fail("smoke 失败信息", str(e))
+            ok("smoke 失败中断 (UPDATE_FAILED_AFTER_PULL)")
 
 
 def test_health_check_failure_aborts():
     """健康检查失败 -> 停止"""
-    fake = _prepare()
-    def bad_health(port=5000, timeout_seconds=30, runner=None):
-        raise RuntimeError("health boom")
-    update_qcos._health_check = bad_health
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
-    try:
-        update_qcos.run_update(runner=fake)
-        fail("健康检查失败应中断", "未抛异常")
-    except RuntimeError as e:
-        if "UPDATE_FAILED_AFTER_PULL" not in str(e):
-            return fail("健康检查失败信息", str(e))
-        ok("健康检查失败中断")
+    with _prepare() as fake:
+        def bad_health(port=5000, timeout_seconds=30, runner=None):
+            raise RuntimeError("health boom")
+        update_qcos._health_check = bad_health
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
+        try:
+            update_qcos.run_update(runner=fake)
+            fail("健康检查失败应中断", "未抛异常")
+        except RuntimeError as e:
+            if "UPDATE_FAILED_AFTER_PULL" not in str(e):
+                return fail("健康检查失败信息", str(e))
+            ok("健康检查失败中断")
 
 
 def test_already_up_to_date():
     """无更新 -> ALREADY_UP_TO_DATE，不执行 pull"""
-    fake = _prepare()
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git rev-parse origin/main"] = _Result(0, "a" * 40 + "\n", "")
-    info = update_qcos.run_update(runner=fake)
-    if not info.get("already_up_to_date"):
-        return fail("应识别已是最新")
-    if any("git pull" in " ".join(c) for c in fake.calls):
-        return fail("已是最新不应执行 pull")
-    if info.get("status") != "ALREADY_UP_TO_DATE":
-        return fail("状态应为 ALREADY_UP_TO_DATE", str(info.get("status")))
-    ok("ALREADY_UP_TO_DATE（不执行无意义 pull）")
+    with _prepare() as fake:
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git rev-parse origin/main"] = _Result(0, "a" * 40 + "\n", "")
+        info = update_qcos.run_update(runner=fake)
+        if not info.get("already_up_to_date"):
+            return fail("应识别已是最新")
+        if any("git pull" in " ".join(c) for c in fake.calls):
+            return fail("已是最新不应执行 pull")
+        if info.get("status") != "ALREADY_UP_TO_DATE":
+            return fail("状态应为 ALREADY_UP_TO_DATE", str(info.get("status")))
+        ok("ALREADY_UP_TO_DATE（不执行无意义 pull）")
 
 
 def test_full_success():
     """完整成功流程 + 输出关键字段 + 无危险命令"""
-    fake = _prepare()
-    fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
-    fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
-    fake.results["git pull"] = _Result(0, "", "")
-    info = update_qcos.run_update(runner=fake)
+    with _prepare() as fake:
+        fake.results["git rev-parse HEAD"] = _Result(0, "a" * 40 + "\n", "")
+        fake.results["git rev-parse origin/main"] = _Result(0, "b" * 40 + "\n", "")
+        fake.results["git pull"] = _Result(0, "", "")
+        info = update_qcos.run_update(runner=fake)
 
-    if info.get("status") != "UPDATE_SUCCESS":
-        return fail("UPDATE_SUCCESS", str(info))
-    if info.get("old_commit") != "a" * 40:
-        return fail("OLD_COMMIT", str(info.get("old_commit")))
-    if info.get("server_pid") != 8888:
-        return fail("SERVER_PID", str(info.get("server_pid")))
-    if not info.get("health_check"):
-        return fail("HEALTH_CHECK", str(info.get("health_check")))
-    if "backups" not in info.get("backup_path", ""):
-        return fail("BACKUP_PATH", str(info.get("backup_path")))
+        if info.get("status") != "UPDATE_SUCCESS":
+            return fail("UPDATE_SUCCESS", str(info))
+        if info.get("old_commit") != "a" * 40:
+            return fail("OLD_COMMIT", str(info.get("old_commit")))
+        if info.get("server_pid") != 8888:
+            return fail("SERVER_PID", str(info.get("server_pid")))
+        if not info.get("health_check"):
+            return fail("HEALTH_CHECK", str(info.get("health_check")))
+        if "backups" not in info.get("backup_path", ""):
+            return fail("BACKUP_PATH", str(info.get("backup_path")))
 
-    # 危险命令审计
-    all_cmds = [" ".join(c) for c in fake.calls]
-    for bad in ["reset --hard", "clean -fd", "stash", "checkout --force", "pull --force"]:
-        if any(bad in c for c in all_cmds):
-            return fail(f"出现危险命令: {bad}", str(all_cmds))
-    # 必须使用 --ff-only
-    if not any("pull" in c and "--ff-only" in c for c in all_cmds):
-        return fail("pull 必须 --ff-only", str(all_cmds))
-    ok("完整成功流程 + 危险命令审计")
+        # 危险命令审计
+        all_cmds = [" ".join(c) for c in fake.calls]
+        for bad in ["reset --hard", "clean -fd", "stash", "checkout --force", "pull --force"]:
+            if any(bad in c for c in all_cmds):
+                return fail(f"出现危险命令: {bad}", str(all_cmds))
+        # 必须使用 --ff-only
+        if not any("pull" in c and "--ff-only" in c for c in all_cmds):
+            return fail("pull 必须 --ff-only", str(all_cmds))
+        ok("完整成功流程 + 危险命令审计")
 
 
 def test_no_hardcoded_user_paths():
