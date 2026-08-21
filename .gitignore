@@ -9,6 +9,7 @@ logs/
 runtime/
 exports/
 analytics_examples/
+reports/
 
 __pycache__/
 *.pyc

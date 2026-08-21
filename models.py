@@ -742,6 +742,32 @@ def init_db():
     if 'source_id' not in s_col_names:
         db.execute('ALTER TABLE sessions ADD COLUMN source_id TEXT')
 
+    # ===== 迁移：sessions 加历史导入元数据 =====
+    # time_precision: date_only 表示时间来自 Excel 仅精确到日期（不伪造具体时刻）
+    # import_quality: PARTIAL 表示不完整桌（已知玩家 < 4）
+    if 'time_precision' not in s_col_names:
+        db.execute('ALTER TABLE sessions ADD COLUMN time_precision TEXT')
+    if 'import_quality' not in s_col_names:
+        db.execute('ALTER TABLE sessions ADD COLUMN import_quality TEXT')
+
+    # ===== 迁移：legacy_import_records 导入登记表 =====
+    # 防止同一 Excel 行重复导入；UNIQUE(source, source_sheet, source_row) 为幂等核心。
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS legacy_import_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            source_sheet TEXT,
+            source_row INTEGER,
+            legacy_table_no TEXT,
+            date TEXT,
+            entity_type TEXT,
+            entity_id INTEGER,
+            imported_at TEXT,
+            hash TEXT,
+            UNIQUE(source, source_sheet, source_row)
+        )'''
+    )
+
     # 插入默认机器
     for m in MACHINES:
         existing = db.execute('SELECT id FROM machines WHERE id=?', [m['id']]).fetchone()
