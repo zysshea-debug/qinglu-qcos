@@ -102,6 +102,26 @@ function renderActiveCard(m) {
     const activeCount = s.active_player_count || 0;
     const checkedCount = s.checked_out_count || 0;
 
+    // V3: 通宵三层时间展示
+    const isON = s.is_overnight;
+    const autoEnded = s.auto_ended;
+    const confirmed = s.end_time_confirmed;
+    const deadlineHtml = (isON || s.auto_end_at) ? `
+        <div class="overnight-banner ${autoEnded && !confirmed ? 'pending' : ''}">
+            <i class="bi bi-moon-stars"></i> 通宵 · ${s.overnight_status_label || '使用中'}
+            ${s.auto_end_at ? `<span class="ms-2 small">系统默认截止：${formatTime(s.auto_end_at)}</span>` : ''}
+            ${s.actual_end_time ? `<span class="ms-2 small text-success">实际结束：${formatTime(s.actual_end_time)}${confirmed ? '（已确认）' : '（待确认）'}</span>` : ''}
+        </div>` : '';
+
+    const confirmButtons = (autoEnded && !confirmed) ? `
+        <div class="btn-group btn-group-sm w-100 mt-1">
+            <button class="btn btn-warning" onclick="confirmEndTime(${s.id})"><i class="bi bi-check-circle"></i> 确认结束</button>
+            <button class="btn btn-outline-warning" onclick="openAdjustEndTime(${s.id})"><i class="bi bi-clock-history"></i> 调整结束时间</button>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm w-100 mt-1" onclick="openExtendEndTime(${s.id})">
+            <i class="bi bi-arrow-up-circle"></i> 延长结束时间
+        </button>` : '';
+
     const playerRows = players.map(p => {
         const isPlaying = p.status === 'playing';
         const statusBadge = isPlaying
@@ -144,10 +164,12 @@ function renderActiveCard(m) {
             <span class="status-dot active"></span> 使用中
             <span class="ms-2 small text-muted">${activeCount}人游戏中 / ${checkedCount}人已结</span>
         </div>
+        ${deadlineHtml}
         <div class="player-list">${playerRows}</div>
         ${activeCount > 0 ? `<button class="btn btn-outline-primary btn-sm w-100 mt-2" onclick="addPlayerToSession(${s.id}, '${m.name}')">
             <i class="bi bi-person-plus"></i> 加人
         </button>` : ''}
+        ${confirmButtons}
         <button class="btn btn-outline-danger btn-sm w-100 mt-1" onclick="forceCloseSession(${s.id}, '${m.name}')">
             <i class="bi bi-x-octagon"></i> 强制关台
         </button>
@@ -326,6 +348,67 @@ async function forceCloseSession(sessionId, machineName) {
             const err = await res.json();
             alert(err.error || '关台失败');
         }
+    } catch (e) { alert('网络错误'); }
+}
+
+// ===== V3: 通宵结束时间管理 =====
+
+async function confirmEndTime(sessionId) {
+    if (!confirm('确认按系统默认截止时间作为实际结束时间？\n（之后账单将按该时间结算）')) return;
+    try {
+        const res = await fetch(`/api/sessions/${sessionId}/confirm-end-time`, { method: 'POST' });
+        if (res.ok) { fetchMachines(); }
+        else { const err = await res.json(); alert(err.error || '确认失败'); }
+    } catch (e) { alert('网络错误'); }
+}
+
+function openAdjustEndTime(sessionId) {
+    currentSessionId = sessionId;
+    document.getElementById('adjustSessionId').textContent = sessionId;
+    document.getElementById('adjustEndTime').value = '';
+    document.getElementById('adjustReason').value = 'OVERNIGHT_LATE_PLAY';
+    new bootstrap.Modal(document.getElementById('adjustEndTimeModal')).show();
+}
+
+async function submitAdjustEndTime() {
+    const sessionId = currentSessionId;
+    const actual = document.getElementById('adjustEndTime').value;
+    const reason = document.getElementById('adjustReason').value;
+    if (!actual) { alert('请填写实际结束时间'); return; }
+    try {
+        const res = await fetch(`/api/sessions/${sessionId}/adjust-end-time`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actual_end_time: actual, reason })
+        });
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('adjustEndTimeModal')).hide();
+            fetchMachines();
+        } else { const err = await res.json(); alert(err.error || '调整失败'); }
+    } catch (e) { alert('网络错误'); }
+}
+
+function openExtendEndTime(sessionId) {
+    currentSessionId = sessionId;
+    document.getElementById('extendSessionId').textContent = sessionId;
+    document.getElementById('extendMinutes').value = '60';
+    new bootstrap.Modal(document.getElementById('extendEndTimeModal')).show();
+}
+
+async function submitExtendEndTime() {
+    const sessionId = currentSessionId;
+    const minutes = parseInt(document.getElementById('extendMinutes').value || '0', 10);
+    if (!minutes || minutes <= 0) { alert('请输入有效的延长分钟数'); return; }
+    try {
+        const res = await fetch(`/api/sessions/${sessionId}/extend`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ minutes })
+        });
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('extendEndTimeModal')).hide();
+            fetchMachines();
+        } else { const err = await res.json(); alert(err.error || '延长失败'); }
     } catch (e) { alert('网络错误'); }
 }
 

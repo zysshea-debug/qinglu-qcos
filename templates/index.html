@@ -7,6 +7,15 @@
     <h4><i class="bi bi-speedometer2"></i> 台桌总览</h4>
     <small class="text-muted" id="currentTime"></small>
 </div>
+<style>
+.overnight-banner {
+    background: #eef3ff; border: 1px solid #c9d6ff; border-radius: 8px;
+    padding: 6px 10px; margin: 6px 0; font-size: .9rem; color: #1a3a8f;
+}
+.overnight-banner.pending {
+    background: #fff8e1; border-color: #ffd54f; color: #8a6d00;
+}
+</style>
 <div class="machine-grid" id="machineGrid"></div>
 
 <!-- 开台弹窗 -->
@@ -36,6 +45,65 @@
                 <button type="button" class="btn btn-primary" onclick="confirmStartSession()">
                     <i class="bi bi-check-circle"></i> 确认开台
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- V3: 调整实际结束时间弹窗 -->
+<div class="modal fade" id="adjustEndTimeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title">调整实际结束时间 <small class="text-muted">桌局 #<span id="adjustSessionId"></span></small></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">用于通宵无人值班后，员工第二天到店按真实离开时间修正。可晚于系统默认截止 11:00。</p>
+                <div class="mb-3">
+                    <label class="form-label">实际结束时间</label>
+                    <input type="datetime-local" class="form-control" id="adjustEndTime">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">原因</label>
+                    <select class="form-select" id="adjustReason">
+                        <option value="OVERNIGHT_LATE_PLAY">客人玩到更晚</option>
+                        <option value="CUSTOMER_LEFT_EARLY">客人提前离开</option>
+                        <option value="STAFF_LATE_CHECKOUT">员工晚点结账</option>
+                        <option value="MANUAL_CORRECTION">人工更正</option>
+                        <option value="OTHER">其他</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-warning" onclick="submitAdjustEndTime()">确认实际结束时间</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- V3: 延长结束时间弹窗 -->
+<div class="modal fade" id="extendEndTimeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-secondary text-white">
+                <h5 class="modal-title">延长结束时间 <small class="text-muted">桌局 #<span id="extendSessionId"></span></small></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">人工延长系统默认截止时间（突破 11:00 封顶，代表真实经营决定）。</p>
+                <div class="mb-3">
+                    <label class="form-label">延长分钟数</label>
+                    <input type="number" class="form-control" id="extendMinutes" value="60" min="1">
+                    <div class="form-text">常用：+30 / +60 / +120 分钟</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('extendMinutes').value='30'">+30分钟</button>
+                <button class="btn btn-secondary" onclick="document.getElementById('extendMinutes').value='120'">+2小时</button>
+                <button class="btn btn-primary" onclick="submitExtendEndTime()">延长</button>
             </div>
         </div>
     </div>

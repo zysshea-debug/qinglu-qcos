@@ -12,6 +12,7 @@ import os
 
 from models import get_db, init_db, get_all_settings, update_setting, hash_password
 from billing import calculate_fee, calculate_discount, calculate_manual_discount, get_current_fee, get_billing_explanation
+import overnight
 from config import (MACHINE_TYPE_LABELS, MACHINE_MAX_PLAYERS, LOTTERY_TYPES,
                     PAYMENT_METHODS, PAGE_PERMISSIONS, ROLES, PRODUCT_CATEGORIES,
                     STAFF_TYPES, STAFF_STATUS, SETTLEMENT_STATUS, SECRET_KEY,
@@ -260,6 +261,9 @@ def api_delete_user(user_id):
 @login_required
 def api_machines():
     db = g.db
+    # V3: 离线/超时补偿 —— 将已越过 auto_end_at 的通宵桌标记为 auto_ended（幂等）
+    overnight.reap_overnight_sessions(db)
+    db.commit()
     machines = db.execute('SELECT * FROM machines ORDER BY sort_order').fetchall()
     settings = get_all_settings(db)
 
@@ -275,6 +279,16 @@ def api_machines():
 
         if sess:
             sess = dict(sess)
+            # V3: 暴露通宵三层时间与状态，供前端展示与结账确认
+            label_key, label_text, deadline = overnight.session_overnight_status(sess)
+            sess['is_overnight'] = bool(sess.get('is_overnight'))
+            sess['auto_end_at'] = sess.get('auto_end_at')
+            sess['auto_ended'] = bool(sess.get('auto_ended'))
+            sess['actual_end_time'] = sess.get('actual_end_time')
+            sess['end_time_confirmed'] = bool(sess.get('end_time_confirmed'))
+            sess['overnight_status_key'] = label_key
+            sess['overnight_status_label'] = label_text
+            sess['deadline'] = deadline.isoformat(timespec='seconds') if deadline else None
             machine_type = machine['type']
             players = db.execute(
                 'SELECT sp.*, p.id as pid, p.is_member, p.member_id FROM session_players sp '
@@ -379,6 +393,9 @@ def api_create_session():
             )
 
     db.execute('UPDATE machines SET status="active" WHERE id=?', [machine_id])
+    # V3: 通宵桌设置系统默认保护截止（start+8h 封顶 11:00）
+    sess_overnight = any(bool(p.get('is_overnight')) for p in data.get('players', []) if p.get('name'))
+    overnight.ensure_auto_end_at(db, session_id, sess_overnight, session_start)
     db.commit()
 
     return jsonify({'id': session_id, 'start_time': session_start.isoformat()}), 201
@@ -391,6 +408,8 @@ def api_preview_checkout(session_id):
     settings = get_all_settings(db)
 
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     if not sess:
         return jsonify({'error': '会话不存在'}), 404
 
@@ -402,12 +421,13 @@ def api_preview_checkout(session_id):
     ).fetchall()
 
     start_time = datetime.fromisoformat(sess['start_time'])
-    end_time = datetime.now()
-
-    fee, breakdown = calculate_fee(machine['type'], start_time, end_time, settings)
+    # V3: 统一使用 effective_end_time（actual > auto_end > now）
+    is_overnight = bool(sess.get('is_overnight'))
+    end_time = overnight.effective_end_time(dict(sess))
+    fee, breakdown = calculate_fee(machine['type'], start_time, end_time, settings, is_overnight=is_overnight)
 
     billing_explanation = get_billing_explanation(
-        machine['type'], start_time, end_time, settings, is_overnight=True
+        machine['type'], start_time, end_time, settings, is_overnight=is_overnight
     )
 
     available_discounts = []
@@ -446,6 +466,12 @@ def api_preview_checkout(session_id):
         'start_time': sess['start_time'],
         'end_time': end_time.isoformat(),
         'duration_minutes': round((end_time - start_time).total_seconds() / 60, 1),
+        'is_overnight': is_overnight,
+        'auto_end_at': sess.get('auto_end_at'),
+        'auto_ended': bool(sess.get('auto_ended')),
+        'actual_end_time': sess.get('actual_end_time'),
+        'end_time_confirmed': bool(sess.get('end_time_confirmed')),
+        'needs_end_time_confirmation': bool(sess.get('auto_ended') and not sess.get('end_time_confirmed') and not sess.get('actual_end_time')),
         'fee': fee,
         'fee_breakdown': breakdown,
         'billing_explanation': billing_explanation,
@@ -465,16 +491,30 @@ def api_close_session(session_id):
     settings = get_all_settings(db)
 
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     if not sess:
         return jsonify({'error': '会话不存在'}), 404
     if sess['status'] != 'active':
         return jsonify({'error': '会话已关闭'}), 400
 
     machine = db.execute('SELECT * FROM machines WHERE id=?', [sess['machine_id']]).fetchone()
-    start_time = datetime.fromisoformat(sess['start_time'])
-    end_time = datetime.now()
 
-    fee, breakdown = calculate_fee(machine['type'], start_time, end_time, settings)
+    # V3: 自动截止后、未确认实际结束时间 -> 结账前必须先确认/调整
+    if sess.get('auto_ended') and not sess.get('end_time_confirmed') and not sess.get('actual_end_time'):
+        if not data.get('auto_end_confirmed'):
+            return jsonify({
+                'error': 'NEEDS_END_TIME_CONFIRMATION',
+                'message': '该通宵桌已自动截止，请先确认实际结束时间后再结账。',
+                'auto_end_at': sess.get('auto_end_at'),
+            }), 409
+
+    start_time = datetime.fromisoformat(sess['start_time'])
+    # V3: 统一使用 effective_end_time（actual > auto_end > now）
+    is_overnight = bool(sess.get('is_overnight'))
+    end_time = overnight.effective_end_time(dict(sess))
+
+    fee, breakdown = calculate_fee(machine['type'], start_time, end_time, settings, is_overnight=is_overnight)
 
     discount_type = None
     discount_id = None
@@ -521,11 +561,15 @@ def api_close_session(session_id):
     db.execute(
         '''UPDATE sessions SET end_time=?, duration_minutes=?, fee=?, fee_breakdown=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
-           payment_method=?, status="closed" WHERE id=?''',
+           payment_method=?, status="closed",
+           actual_end_time=?, end_time_confirmed=1, end_time_confirmed_at=?
+           WHERE id=?''',
         [end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          discount_type, discount_id, discount_amount, final_fee,
-         payment_method, session_id]
+         payment_method,
+         end_time.isoformat(), datetime.now().isoformat(),
+         session_id]
     )
     db.execute('UPDATE machines SET status="idle" WHERE id=?', [sess['machine_id']])
     if discount_id:
@@ -559,6 +603,8 @@ def api_force_close_session(session_id):
     """强制关台 - 用于异常情况"""
     db = g.db
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     if not sess:
         return jsonify({'error': '会话不存在'}), 404
     if sess['status'] != 'active':
@@ -586,6 +632,85 @@ def api_force_close_session(session_id):
     return jsonify({'status': 'ok', 'message': '台桌已强制关闭'})
 
 
+# ===== V3: 通宵桌结束时间管理（调整 / 确认 / 延长） =====
+
+@app.route('/api/sessions/<int:session_id>/adjust-end-time', methods=['POST'])
+@role_required('dashboard')
+def api_adjust_end_time(session_id):
+    """人工确认真实结束时间（可晚于 auto_end_at / 11:00，可早于 auto_end_at）。
+
+    记录审计；不自动付款、不关闭台桌。关闭后的会话(已结账)不可修改。
+    """
+    data = request.get_json(silent=True) or {}
+    db = g.db
+    sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
+    if not sess:
+        return jsonify({'error': '会话不存在'}), 404
+    if sess['status'] != 'active':
+        return jsonify({'error': '会话已关闭，不能修改结束时间'}), 400
+    actual = data.get('actual_end_time') or data.get('actual_end_time_str')
+    if not actual:
+        return jsonify({'error': '缺少 actual_end_time'}), 400
+    try:
+        actual_dt = datetime.fromisoformat(actual)
+    except (ValueError, TypeError):
+        return jsonify({'error': '结束时间格式不正确'}), 400
+    reason = data.get('reason', 'MANUAL_CORRECTION')
+    operator = g.user['name'] if g.user else (data.get('operator') or 'unknown')
+    row = overnight.set_actual_end_time(db, session_id, actual_dt, operator, reason)
+    db.commit()
+    return jsonify({'status': 'ok', 'session': dict(row)})
+
+
+@app.route('/api/sessions/<int:session_id>/confirm-end-time', methods=['POST'])
+@role_required('dashboard')
+def api_confirm_end_time(session_id):
+    """结账前确认：无人知道真实结束时间时，默认把 auto_end_at 作为实际结束时间。"""
+    db = g.db
+    sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
+    if not sess:
+        return jsonify({'error': '会话不存在'}), 404
+    if sess['status'] != 'active':
+        return jsonify({'error': '会话已关闭，不能确认'}), 400
+    operator = g.user['name'] if g.user else 'unknown'
+    row = overnight.confirm_default_end_time(db, session_id, operator)
+    db.commit()
+    return jsonify({'status': 'ok', 'session': dict(row)})
+
+
+@app.route('/api/sessions/<int:session_id>/extend', methods=['POST'])
+@role_required('dashboard')
+def api_extend_end_time(session_id):
+    """人工延长 / 重设 auto_end_at（突破 11:00 封顶）。
+
+    支持 minutes(+30/+1h/+2h/自定义) 或 to_time(绝对时间)；延长后重置 auto_ended=0。
+    """
+    data = request.get_json(silent=True) or {}
+    db = g.db
+    sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
+    if not sess:
+        return jsonify({'error': '会话不存在'}), 404
+    if sess['status'] != 'active':
+        return jsonify({'error': '会话已关闭，不能延长'}), 400
+    minutes = data.get('minutes')
+    to_time = data.get('to_time')
+    if minutes is not None:
+        try:
+            minutes = int(minutes)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'minutes 必须为整数'}), 400
+    operator = g.user['name'] if g.user else (data.get('operator') or 'unknown')
+    row = overnight.extend_session_deadline(db, session_id, minutes=minutes, to_time=to_time, operator=operator)
+    db.commit()
+    return jsonify({'status': 'ok', 'session': dict(row)})
+
+
 # ===== API: 单人结账（每人独立计时/消费/结账）=====
 
 @app.route('/api/sessions/<int:session_id>/players', methods=['POST'])
@@ -595,6 +720,8 @@ def api_add_player(session_id):
     data = request.json
     db = g.db
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     if not sess or sess['status'] != 'active':
         return jsonify({'error': '台桌不在使用中'}), 400
     machine = db.execute('SELECT * FROM machines WHERE id=?', [sess['machine_id']]).fetchone()
@@ -630,6 +757,13 @@ def api_add_player(session_id):
         'INSERT INTO session_players (session_id, player_name, player_id, is_organizer, visit_type, start_time, is_overnight, status) VALUES (?, ?, ?, 0, ?, ?, ?, "playing")',
         [session_id, name, player_id, data.get('visit_type', 'passive'), start_time.isoformat(), is_overnight]
     )
+    # V3: 若该玩家为通宵，则桌局标记为通宵并设置默认保护截止
+    if is_overnight:
+        existing = db.execute(
+            'SELECT COUNT(*) c FROM session_players WHERE session_id=? AND is_overnight=1', [session_id]
+        ).fetchone()['c']
+        if existing:
+            overnight.ensure_auto_end_at(db, session_id, True, sess['start_time'])
     db.commit()
     return jsonify({'status': 'ok', 'id': cursor.lastrowid}), 201
 
@@ -650,6 +784,8 @@ def api_player_preview(session_id, sp_id):
         return jsonify({'error': '玩家不存在'}), 404
 
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     machine = db.execute('SELECT * FROM machines WHERE id=?', [sess['machine_id']]).fetchone()
     machine_type = machine['type']
 
@@ -671,10 +807,11 @@ def api_player_preview(session_id, sp_id):
     if isinstance(is_overnight, str):
         is_overnight = 1 if is_overnight.lower() in ('1', 'true', 'yes') else 0
     is_overnight = bool(is_overnight)
+    # V3: 统一结束时间边界 —— 用整桌 effective_end_time，整桌通宵标志一致
+    effective_is_overnight = bool(sess.get('is_overnight'))
+    end_time = overnight.effective_end_time(dict(sess))
 
-    end_time = datetime.now()
-
-    fee, breakdown = calculate_fee(machine_type, start_time, end_time, settings, is_overnight=is_overnight)
+    fee, breakdown = calculate_fee(machine_type, start_time, end_time, settings, is_overnight=effective_is_overnight)
     sp['machine_name'] = machine['name']
     sp['machine_type'] = machine_type
     sp['type_label'] = MACHINE_TYPE_LABELS.get(machine_type, '')
@@ -683,7 +820,7 @@ def api_player_preview(session_id, sp_id):
     sp['duration_minutes'] = round((end_time - start_time).total_seconds() / 60, 1)
     sp['fee'] = fee
     sp['fee_breakdown'] = breakdown
-    sp['is_overnight'] = 1 if is_overnight else 0
+    sp['is_overnight'] = 1 if effective_is_overnight else 0
 
     # 手动台费折扣（金额减免 / 折扣比例）
     manual_discount_type = data.get('manual_discount_type') or sp.get('manual_discount_type') or None
@@ -698,7 +835,7 @@ def api_player_preview(session_id, sp_id):
 
     # V1.4 计费说明（面向客人的透明计费）
     sp['billing_explanation'] = get_billing_explanation(
-        machine_type, start_time, end_time, settings, is_overnight=is_overnight
+        machine_type, start_time, end_time, settings, is_overnight=effective_is_overnight
     )
 
     # 该玩家的商品（仅未结算的挂账消费，已结算的不重复带入结账）
@@ -777,6 +914,12 @@ def api_update_player_time(session_id, sp_id):
         'UPDATE session_players SET start_time=?, is_overnight=? WHERE id=?',
         [start_time.isoformat(), 1 if is_overnight else 0, sp_id]
     )
+    # V3: 通宵标志变化 -> 同步桌局 auto_end_at
+    remaining = db.execute(
+        'SELECT COUNT(*) c FROM session_players WHERE session_id=? AND is_overnight=1', [session_id]
+    ).fetchone()['c']
+    sess_now = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    overnight.ensure_auto_end_at(db, session_id, remaining > 0, sess_now['start_time'])
     db.commit()
 
     return jsonify({
@@ -887,8 +1030,19 @@ def api_player_checkout(session_id, sp_id):
         return jsonify({'error': '该玩家已结账'}), 400
 
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
     machine = db.execute('SELECT * FROM machines WHERE id=?', [sess['machine_id']]).fetchone()
     machine_type = machine['type']
+
+    # V3: 自动截止后、未确认实际结束时间 -> 结账前必须先确认/调整
+    if sess.get('auto_ended') and not sess.get('end_time_confirmed') and not sess.get('actual_end_time'):
+        if not data.get('auto_end_confirmed'):
+            return jsonify({
+                'error': 'NEEDS_END_TIME_CONFIRMATION',
+                'message': '该通宵桌已自动截止，请先确认实际结束时间后再结账。',
+                'auto_end_at': sess.get('auto_end_at'),
+            }), 409
 
     start_time_str = sp['start_time'] or sess['start_time']
     start_time = datetime.fromisoformat(start_time_str)
@@ -905,9 +1059,11 @@ def api_player_checkout(session_id, sp_id):
     if isinstance(is_overnight, str):
         is_overnight = 1 if is_overnight.lower() in ('1', 'true', 'yes') else 0
     is_overnight = bool(is_overnight)
+    # V3: 统一结束时间边界 —— 整桌 effective_end_time + 整桌通宵标志
+    effective_is_overnight = bool(sess.get('is_overnight')) or is_overnight
+    end_time = overnight.effective_end_time(dict(sess))
 
-    end_time = datetime.now()
-    fee, breakdown = calculate_fee(machine_type, start_time, end_time, settings, is_overnight=is_overnight)
+    fee, breakdown = calculate_fee(machine_type, start_time, end_time, settings, is_overnight=effective_is_overnight)
 
     # 手动台费折扣（先应用）
     manual_discount_type = data.get('manual_discount_type') or sp['manual_discount_type'] or None
@@ -976,7 +1132,7 @@ def api_player_checkout(session_id, sp_id):
            manual_discount_type=?, manual_discount_value=?, manual_discount_amount=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
            product_total=?, grand_total=?, payment_method=?, status="checked_out" WHERE id=?''',
-        [start_time.isoformat(), 1 if is_overnight else 0, end_time.isoformat(), duration_minutes, fee,
+        [start_time.isoformat(), 1 if effective_is_overnight else 0, end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          manual_discount_type, manual_discount_value, manual_discount_amount,
          discount_type, discount_id, discount_amount, final_fee,
@@ -1001,8 +1157,8 @@ def api_player_checkout(session_id, sp_id):
     if remaining == 0:
         # 所有人都结账了，关闭台桌
         db.execute(
-            'UPDATE sessions SET end_time=?, status="closed" WHERE id=?',
-            [end_time.isoformat(), session_id]
+            'UPDATE sessions SET end_time=?, status="closed", actual_end_time=?, end_time_confirmed=1 WHERE id=?',
+            [end_time.isoformat(), end_time.isoformat(), session_id]
         )
         db.execute('UPDATE machines SET status="idle" WHERE id=?', [sess['machine_id']])
 

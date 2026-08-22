@@ -768,6 +768,39 @@ def init_db():
         )'''
     )
 
+    # ===== 迁移：sessions 通宵三层时间模型（V3） =====
+    # start_time(已有) / auto_end_at(系统默认保护截止) / actual_end_time(人工确认真实结束)
+    # auto_ended: 是否已触发系统自动截止；end_time_confirmed: 是否已人工确认结束
+    s_cols = db.execute('PRAGMA table_info(sessions)').fetchall()
+    s_col_names = [c['name'] for c in s_cols]
+    for col_name, col_type in [
+        ('is_overnight', 'INTEGER DEFAULT 0'),
+        ('auto_end_at', 'TEXT'),
+        ('auto_ended', 'INTEGER DEFAULT 0'),
+        ('auto_end_reason', 'TEXT'),
+        ('actual_end_time', 'TEXT'),
+        ('end_time_confirmed', 'INTEGER DEFAULT 0'),
+        ('end_time_confirmed_at', 'TEXT'),
+        ('end_time_confirmed_by', 'TEXT'),
+    ]:
+        if col_name not in s_col_names:
+            db.execute(f'ALTER TABLE sessions ADD COLUMN {col_name} {col_type}')
+
+    # ===== 结束时间修改审计表（收费数据不可无痕改）=====
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS end_time_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            old_end_time TEXT,
+            new_end_time TEXT,
+            operator TEXT,
+            reason TEXT,
+            changed_at TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )'''
+    )
+
     # 插入默认机器
     for m in MACHINES:
         existing = db.execute('SELECT id FROM machines WHERE id=?', [m['id']]).fetchone()
