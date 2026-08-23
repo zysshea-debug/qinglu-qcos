@@ -36,6 +36,7 @@ from calendar import monthrange
 import operations
 import player_matching as pm
 import table_learning as tl
+import revenue
 from operation_feedback import get_feedback
 
 
@@ -65,24 +66,12 @@ def _parse_dt(s):
 
 
 def _gmv_in_range(db, start, end):
-    """区间内 GMV = 台费实收(session_players.grand_total) + 商品销售(product_sales)。
-    口径与 operations._gmv_in_range / /api/daily 保持一致（不含会员充值）。"""
-    sids = [s['id'] for s in db.execute(
-        "SELECT id FROM sessions WHERE status='closed' AND date(start_time) >= ? AND date(start_time) <= ?",
-        [start, end]
-    ).fetchall()]
-    fee_total = 0.0
-    if sids:
-        sp = db.execute(
-            'SELECT SUM(grand_total) t, SUM(final_fee) f FROM session_players WHERE session_id IN (%s)'
-            % ','.join('?' * len(sids)), sids
-        ).fetchone()
-        fee_total = float(sp['t'] or sp['f'] or 0)
-    prod = db.execute(
-        'SELECT SUM(total) t FROM product_sales WHERE date(created_at) >= ? AND date(created_at) <= ?',
-        [start, end]
-    ).fetchone()['t'] or 0
-    return round(float(fee_total) + float(prod), 2)
+    """区间内真实实收 GMV（V1.6 新口径）。
+
+    一律按 business_date（真实支付/结账时间归属的 Asia/Shanghai 日期），
+    并排除 is_voided=1。与收银流水视图穿透一致。不含会员充值。
+    """
+    return revenue.real_gmv_range(db, start, end, include_voided=False)
 
 
 def _get_target(db):
@@ -112,6 +101,8 @@ def resolve_range(filter_type, custom_start=None, custom_end=None):
     today = _today()
     if filter_type == 'today':
         s = e = today.isoformat()
+    elif filter_type == 'yesterday':
+        s = e = (today - timedelta(days=1)).isoformat()
     elif filter_type == '7d':
         s = (today - timedelta(days=6)).isoformat()
         e = today.isoformat()
@@ -132,7 +123,13 @@ def resolve_range(filter_type, custom_start=None, custom_end=None):
 # ===================== 四类指标聚合 =====================
 
 def aggregate_business(db):
-    """营业指标（固定参考：今日 / 本周 / 本月 / 目标 / 预测）。不受时间筛选影响。"""
+    """营业指标（固定参考：今日 / 本周 / 本月 / 目标 / 预测）。不受时间筛选影响。
+
+    V1.6 重构：
+      - 真实实收 GMV 全部按 business_date 归属（跨午夜桌归真实支付日）。
+      - 新增：当前进行中预计（active 桌估算，非真实 GMV）、今日经营观察值、
+        当前进行中桌数、今日已结账桌数。
+    """
     today = _today()
     t_str = today.isoformat()
     week_start = (today - timedelta(days=today.weekday())).isoformat()
@@ -142,6 +139,10 @@ def aggregate_business(db):
     today_gmv = _gmv_in_range(db, t_str, t_str)
     week_gmv = _gmv_in_range(db, week_start, t_str)
     month_gmv = _gmv_in_range(db, month_start, t_str)
+
+    in_progress = revenue.in_progress_estimate(db)
+    closed_today = revenue.closed_sessions_on_date(db, t_str)
+    active_cnt = revenue.active_session_count(db)
 
     completion_pct = round(month_gmv / target * 100, 1) if target else 0.0
     remaining = max(0, target - month_gmv)
@@ -158,6 +159,10 @@ def aggregate_business(db):
 
     return {
         'today_gmv': today_gmv,
+        'today_in_progress': in_progress,
+        'today_observed': round(today_gmv + in_progress, 2),
+        'today_closed_sessions': closed_today,
+        'active_sessions': active_cnt,
         'week_gmv': week_gmv,
         'month_gmv': month_gmv,
         'month_target': target,
@@ -383,6 +388,10 @@ def build_business_summary(db):
     return {
         'generated_at': _now().isoformat(timespec='seconds'),
         'today_gmv': biz['today_gmv'],
+        'today_in_progress': biz['today_in_progress'],
+        'today_observed': biz['today_observed'],
+        'today_closed_sessions': biz['today_closed_sessions'],
+        'active_sessions': biz['active_sessions'],
         'week_gmv': biz['week_gmv'],
         'month_gmv': biz['month_gmv'],
         'month_target': biz['month_target'],
@@ -606,18 +615,16 @@ def build_monthly_report(db):
 
     machine_revenue = []
     for mid, mname in [(1, '八口机1'), (2, '八口机2'), (3, '四口机1'), (4, '四口机2')]:
-        sids = [s['id'] for s in db.execute(
-            "SELECT id FROM sessions WHERE machine_id=? AND status='closed' AND date(start_time)>=? AND date(start_time)<=?",
+        rows = revenue.iter_real_settlements(db, business_date=None)
+        fee = sum(float(r.get('grand_total') or 0) for r in rows
+                  if r.get('machine_id') == mid
+                  and (r.get('business_date') or '') >= month_start
+                  and (r.get('business_date') or '') <= t_str)
+        sess_cnt = db.execute(
+            "SELECT COUNT(*) c FROM sessions WHERE machine_id=? AND status='closed' AND business_date>=? AND business_date<=?",
             [mid, month_start, t_str]
-        ).fetchall()]
-        fee = 0.0
-        if sids:
-            sp = db.execute(
-                'SELECT SUM(grand_total) t FROM session_players WHERE session_id IN (%s)'
-                % ','.join('?' * len(sids)), sids
-            ).fetchone()
-            fee = float(sp['t'] or 0)
-        machine_revenue.append({'machine': mname, 'gmv': round(fee, 2), 'sessions': len(sids)})
+        ).fetchone()['c']
+        machine_revenue.append({'machine': mname, 'gmv': round(fee, 2), 'sessions': sess_cnt})
 
     return {
         'generated_at': _now().isoformat(timespec='seconds'),

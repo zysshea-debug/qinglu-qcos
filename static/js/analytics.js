@@ -44,17 +44,16 @@ function card(label, value, colorClass, sub) {
 }
 
 function renderBusiness(b) {
+    // V1.6：明确区分「实收」与「预计」，避免用户误认进行中预计已收款。
+    // 今日实收 GMV / 当前进行中预计 / 今日经营观察值 直接复用后端返回值，不在前端重算。
     const cards = [
-        card('今日 GMV', fmtMoney(b.today_gmv), 'text-primary'),
-        card('本周 GMV', fmtMoney(b.week_gmv), 'text-dark'),
-        card('本月 GMV', fmtMoney(b.month_gmv), 'text-dark'),
+        card('今日实收 GMV', fmtMoney(b.today_gmv), 'text-primary', '已完成结账'),
+        card('当前进行中预计', fmtMoney(b.today_in_progress || 0), 'text-warning', '未结账·非实收'),
+        card('今日经营观察值', fmtMoney(b.today_observed || 0), 'text-info', '含进行中预计'),
+        card('本周实收 GMV', fmtMoney(b.week_gmv || 0), 'text-dark'),
+        card('本月实收 GMV', fmtMoney(b.month_gmv || 0), 'text-dark'),
         card('月目标完成率', pct(b.month_completion_pct), b.month_completion_pct >= 100 ? 'text-success' : 'text-warning',
-            `目标 ${fmtMoney(b.month_target)}`),
-        card('平均每日 GMV', fmtMoney(b.avg_daily_gmv), 'text-info'),
-        card('预计月底 GMV', fmtMoney(b.forecast_month_end), 'text-dark',
-            `剩 ${b.remain_days} 天`),
-        card('距目标缺口', fmtMoney(b.month_remaining), 'text-danger',
-            b.forecast_gap > 0 ? `预测缺口 ${fmtMoney(b.forecast_gap)}` : `预测超额 ${fmtMoney(-b.forecast_gap)}`),
+            `目标 ${fmtMoney(b.month_target || 0)}`),
     ];
     document.getElementById('businessCards').innerHTML = cards.join('');
 }

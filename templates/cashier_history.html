@@ -1,0 +1,371 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid py-3">
+    <h4 class="mb-3"><i class="bi bi-cash-stack"></i> 收银流水</h4>
+
+    <!-- 筛选 -->
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-auto">
+                    <label class="form-label small mb-1">时间</label>
+                    <div class="btn-group btn-group-sm" role="group" id="presetGroup">
+                        <button class="btn btn-outline-secondary" data-preset="today">今日</button>
+                        <button class="btn btn-outline-secondary" data-preset="yesterday">昨日</button>
+                        <button class="btn btn-outline-secondary" data-preset="7d">近7天</button>
+                        <button class="btn btn-outline-secondary" data-preset="month">本月</button>
+                        <button class="btn btn-outline-secondary" data-preset="custom">自定义</button>
+                    </div>
+                </div>
+                <div class="col-auto" id="customRange" style="display:none">
+                    <label class="form-label small mb-1">起</label>
+                    <input type="date" class="form-control form-control-sm" id="customStart">
+                    <label class="form-label small mb-1">止</label>
+                    <input type="date" class="form-control form-control-sm" id="customEnd">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-1">视图</label>
+                    <div class="btn-group btn-group-sm" id="viewGroup">
+                        <button class="btn btn-outline-primary active" data-view="player">玩家流水</button>
+                        <button class="btn btn-outline-primary" data-view="session">桌局汇总</button>
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-1">作废</label>
+                    <select class="form-select form-select-sm" id="voidMode">
+                        <option value="normal">正常</option>
+                        <option value="voided">已作废</option>
+                        <option value="all">全部</option>
+                    </select>
+                </div>
+                <div class="col">
+                    <label class="form-label small mb-1">玩家搜索</label>
+                    <input type="text" class="form-control form-control-sm" id="playerSearch" placeholder="昵称">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-1">支付方式</label>
+                    <select class="form-select form-select-sm" id="paymentFilter">
+                        <option value="">全部</option>
+                        <option value="wechat">微信</option>
+                        <option value="alipay">支付宝</option>
+                        <option value="cash">现金</option>
+                        <option value="member">会员余额</option>
+                        <option value="scan_wechat">微信扫码</option>
+                        <option value="scan_alipay">支付宝扫码</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-1">台型</label>
+                    <select class="form-select form-select-sm" id="portFilter">
+                        <option value="">全部</option>
+                        <option value="8">八口</option>
+                        <option value="4">四口</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-1">通宵</label>
+                    <select class="form-select form-select-sm" id="overnightFilter">
+                        <option value="">全部</option>
+                        <option value="1">通宵</option>
+                        <option value="0">普通</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-success" onclick="exportCashier()">导出Excel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 汇总卡片 -->
+    <div class="row g-2 mb-3" id="summaryCards"></div>
+
+    <!-- 玩家流水 -->
+    <div class="card" id="playerView">
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height:62vh;overflow:auto">
+                <table class="table table-sm table-hover mb-0" id="playerTable">
+                    <thead class="table-light sticky-top">
+                        <tr>
+                            <th>结账时间</th><th>玩家</th><th>桌号</th><th>四/八</th><th>普通/通宵</th>
+                            <th>开台</th><th>结束</th><th>时长</th><th>台费</th><th>商品</th>
+                            <th>优惠</th><th>应收</th><th>实收</th><th>支付方式</th><th>操作员</th>
+                            <th>状态</th><th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="playerBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 桌局汇总 -->
+    <div class="card" id="sessionView" style="display:none">
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height:62vh;overflow:auto">
+                <table class="table table-sm table-hover mb-0" id="sessionTable">
+                    <thead class="table-light sticky-top">
+                        <tr>
+                            <th>桌号</th><th>玩家</th><th>开台</th><th>结束</th><th>台费</th>
+                            <th>商品</th><th>优惠</th><th>实收</th><th>支付方式</th>
+                            <th>营业日</th><th>状态</th><th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessionBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 详情弹窗 -->
+<div class="modal fade" id="detailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">流水详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body" id="detailBody"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 二次确认弹窗 -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title" id="confirmTitle">确认</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body" id="confirmBody"></div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-danger btn-sm" id="confirmOk">确认</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let CASHIER_STATE = { preset: 'today', view: 'player', void: 'normal' };
+
+function loadCashier() {
+    const params = new URLSearchParams();
+    params.set('preset', CASHIER_STATE.preset);
+    if (CASHIER_STATE.preset === 'custom') {
+        params.set('custom_start', document.getElementById('customStart').value);
+        params.set('custom_end', document.getElementById('customEnd').value);
+    }
+    params.set('player', document.getElementById('playerSearch').value);
+    params.set('payment', document.getElementById('paymentFilter').value);
+    params.set('port', document.getElementById('portFilter').value);
+    params.set('overnight', document.getElementById('overnightFilter').value);
+    params.set('void', CASHIER_STATE.void);
+    fetch('/api/cashier_history?' + params.toString()).then(r => r.json()).then(res => {
+        if (res.status !== 'ok') { alert('加载失败：' + res.message); return; }
+        renderCashier(res.data);
+    });
+}
+
+function renderCashier(data) {
+    const t = data.totals || {};
+    document.getElementById('summaryCards').innerHTML = `
+        <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
+            <div class="small text-muted">真实实收合计</div><div class="fs-5">¥${fmt(t.real_paid||0)}</div></div></div></div>
+        <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
+            <div class="small text-muted">笔数</div><div class="fs-5">${t.count||0}</div></div></div></div>
+        <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
+            <div class="small text-muted">台费</div><div class="fs-5">¥${fmt(t.fee||0)}</div></div></div></div>
+        <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
+            <div class="small text-muted">商品</div><div class="fs-5">¥${fmt(t.product||0)}</div></div></div></div>
+        <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
+            <div class="small text-muted">优惠</div><div class="fs-5">¥${fmt(t.discount||0)}</div></div></div></div>`;
+
+    const isAdmin = window.CURRENT_USER_ROLE === 'admin';
+    const pb = document.getElementById('playerBody');
+    pb.innerHTML = '';
+    data.rows.filter(r => r.kind !== 'session').forEach(r => {
+        const tr = document.createElement('tr');
+        if (r.is_voided) tr.classList.add('table-danger');
+        const port = r.machine_type === '8port' ? '八口' : (r.machine_type === '4port' ? '四口' : '');
+        const status = r.is_voided ? `<span class="badge bg-danger">已作废</span>` :
+            (r.legacy ? `<span class="badge bg-secondary">历史</span>` : '');
+        tr.innerHTML = `
+            <td>${short(r.paid_at)}</td><td>${r.player_name||''}</td><td>${r.machine_name||''}</td>
+            <td>${port}</td><td>${r.is_overnight?'通宵':'普通'}</td>
+            <td>${short(r.start_time)}</td><td>${short(r.end_time)}</td><td>${r.duration_minutes||''}</td>
+            <td>¥${fmt(r.fee)}</td><td>¥${fmt(r.product_total)}</td><td>-¥${fmt(r.discount_amount)}</td>
+            <td>¥${fmt(r.grand_total)}</td><td>${r.payment_label||''}</td><td>${r.operator||''}</td>
+            <td>${status}</td><td>${rowActions(r, isAdmin)}</td>`;
+        pb.appendChild(tr);
+    });
+
+    const sb = document.getElementById('sessionBody');
+    sb.innerHTML = '';
+    data.session_summary.forEach(s => {
+        const tr = document.createElement('tr');
+        if (s.is_voided) tr.classList.add('table-danger');
+        const port = s.machine_type === '8port' ? '八口' : (s.machine_type === '4port' ? '四口' : '');
+        const status = s.is_voided ? `<span class="badge bg-danger">已作废</span>` :
+            (s.legacy ? `<span class="badge bg-secondary">历史</span>` : '');
+        tr.innerHTML = `
+            <td>${s.machine_name||''}</td><td>${s.players||''}</td>
+            <td>${short(s.start_time)}</td><td>${short(s.end_time)}</td>
+            <td>¥${fmt(s.fee)}</td><td>¥${fmt(s.product_total)}</td><td>-¥${fmt(s.discount_amount)}</td>
+            <td>¥${fmt(s.grand_total)}</td><td>${s.payment_label||''}</td><td>${s.business_date||''}</td>
+            <td>${status}</td><td>${rowActions(s, isAdmin)}</td>`;
+        sb.appendChild(tr);
+    });
+}
+
+function rowActions(r, isAdmin) {
+    const id = r.session_id;
+    let html = `<button class="btn btn-sm btn-outline-info" onclick="openDetail(${id})">详情</button> `;
+    if (isAdmin) {
+        if (r.is_voided) {
+            html += `<button class="btn btn-sm btn-outline-success" onclick="doRestore(${id})">恢复</button> `;
+        } else {
+            html += `<button class="btn btn-sm btn-outline-warning" onclick="doVoid(${id})">作废</button> `;
+            html += `<button class="btn btn-sm btn-outline-danger" onclick="doPermanentDelete(${id})">永久删除</button>`;
+        }
+    }
+    return html;
+}
+
+function openDetail(id) {
+    fetch('/api/cashier_history/detail?session_id=' + id).then(r => r.json()).then(res => {
+        if (res.status !== 'ok') { alert(res.message); return; }
+        const s = res.session;
+        let html = `<p><b>桌局 #${id}</b> 桌号：${s.machine_id} 状态：${s.status}
+            营业日：${s.business_date||'-'} 操作员：${s.operator||'-'}</p>`;
+        html += `<p class="small text-muted mb-2">开台时间：${short(s.start_time)||'-'} ｜ 实际结束：${short(s.effective_end_time)||'-'} ｜ 实际时长：${fmtDuration(s.actual_duration_minutes)}</p>`;
+        html += `<h6>玩家结账（${res.players.length}）</h6><table class="table table-sm">
+            <tr><th>玩家</th><th>开台</th><th>结束</th><th>实际时长</th><th>台费</th><th>商品</th><th>优惠</th><th>实收</th><th>支付方式</th></tr>`;
+        res.players.forEach(p => {
+            html += `<tr><td>${p.player_name||''}</td><td>${short(p.start_time)}</td><td>${short(p.end_time)}</td><td>${fmtDuration(p.actual_duration_minutes)}</td>
+                <td>¥${fmt(p.fee)}</td><td>¥${fmt(p.product_total)}</td><td>-¥${fmt(p.discount_amount)}</td>
+                <td>¥${fmt(p.grand_total)}</td><td>${(window.PAYMENT_LABELS||{})[p.payment_method]||p.payment_method||''}</td></tr>`;
+        });
+        html += `</table>`;
+        if (res.products.length) {
+            html += `<h6>商品明细（${res.products.length}）</h6><table class="table table-sm">
+                <tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th></tr>`;
+            res.products.forEach(p => { html += `<tr><td>${p.product_name}</td><td>${p.quantity}</td><td>¥${fmt(p.price)}</td><td>¥${fmt(p.total)}</td></tr>`; });
+            html += `</table>`;
+        }
+        if (res.payments.length) {
+            html += `<h6>支付记录（${res.payments.length}）</h6><table class="table table-sm">
+                <tr><th>方式</th><th>金额</th><th>状态</th><th>时间</th></tr>`;
+            res.payments.forEach(p => { html += `<tr><td>${p.method}</td><td>¥${fmt(p.amount)}</td><td>${p.status}</td><td>${short(p.created_at)}</td></tr>`; });
+            html += `</table>`;
+        }
+        if (res.audit.length) {
+            html += `<h6>审计（${res.audit.length}）</h6><ul class="small">`;
+            res.audit.forEach(a => { html += `<li>${a.action} / ${a.operator} / ${a.reason||''} / ${short(a.changed_at)}</li>`; });
+            html += `</ul>`;
+        }
+        document.getElementById('detailBody').innerHTML = html;
+        new bootstrap.Modal(document.getElementById('detailModal')).show();
+    });
+}
+
+function doVoid(id) {
+    confirmAction('作废桌台流水', '确定作废该桌台流水？作废后将从 GMV / 流水 / 分析中排除（原始记录保留）。', () => {
+        fetch('/api/sessions/' + id + '/void', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({reason:'TEST_DATA'})}).then(r=>r.json()).then(res=>{
+            if (res.status==='ok') loadCashier(); else alert(res.message);
+        });
+    });
+}
+
+function doRestore(id) {
+    confirmAction('恢复作废', '确定恢复该桌台流水？恢复后重新进入 GMV / 流水 / 分析。', () => {
+        fetch('/api/sessions/' + id + '/restore', {method:'POST'}).then(r=>r.json()).then(res=>{
+            if (res.status==='ok') loadCashier(); else alert(res.message);
+        });
+    });
+}
+
+function doPermanentDelete(id) {
+    confirmAction('永久删除测试记录', '⚠️ 此操作将永久删除测试桌台，无法恢复。仅纯测试数据且无真实资金影响时允许。', () => {
+        fetch('/api/sessions/' + id + '/permanent-delete', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({confirmed:true})}).then(r=>r.json()).then(res=>{
+            if (res.status==='ok') loadCashier(); else alert(res.message + (res.code?(' ('+res.code+')'):''));
+        });
+    }, true);
+}
+
+function confirmAction(title, body, onOk, danger) {
+    document.getElementById('confirmTitle').textContent = title;
+    document.getElementById('confirmBody').textContent = body;
+    const btn = document.getElementById('confirmOk');
+    btn.className = 'btn btn-sm ' + (danger ? 'btn-danger' : 'btn-primary');
+    btn.onclick = () => { bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide(); onOk(); };
+    new bootstrap.Modal(document.getElementById('confirmModal')).show();
+}
+
+function exportCashier() {
+    const params = new URLSearchParams();
+    params.set('preset', CASHIER_STATE.preset);
+    if (CASHIER_STATE.preset === 'custom') {
+        params.set('custom_start', document.getElementById('customStart').value);
+        params.set('custom_end', document.getElementById('customEnd').value);
+    }
+    params.set('player', document.getElementById('playerSearch').value);
+    params.set('payment', document.getElementById('paymentFilter').value);
+    params.set('port', document.getElementById('portFilter').value);
+    params.set('overnight', document.getElementById('overnightFilter').value);
+    params.set('void', CASHIER_STATE.void);
+    window.open('/api/cashier_history/export?' + params.toString(), '_blank');
+}
+
+function fmt(v) { return Number(v||0).toFixed(2); }
+function short(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : ''; }
+function fmtDuration(min) {
+    if (min === null || min === undefined || min === '') return '历史数据无精确时间';
+    min = Number(min) || 0;
+    if (min <= 0) return '0分钟';
+    const h = Math.floor(min / 60);
+    const m = Math.round(min % 60);
+    if (h > 0 && m > 0) return `${h}小时${m}分钟`;
+    if (h > 0) return `${h}小时`;
+    return `${m}分钟`;
+}
+
+document.querySelectorAll('#presetGroup button').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#presetGroup button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    CASHIER_STATE.preset = b.dataset.preset;
+    document.getElementById('customRange').style.display = (b.dataset.preset==='custom')?'block':'none';
+    loadCashier();
+});
+document.querySelectorAll('#viewGroup button').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#viewGroup button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    CASHIER_STATE.view = b.dataset.view;
+    document.getElementById('playerView').style.display = (b.dataset.view==='player')?'block':'none';
+    document.getElementById('sessionView').style.display = (b.dataset.view==='session')?'block':'none';
+});
+document.getElementById('voidMode').onchange = (e) => { CASHIER_STATE.void = e.target.value; loadCashier(); };
+['playerSearch','paymentFilter','portFilter','overnightFilter'].forEach(id => {
+    document.getElementById(id).onchange = loadCashier;
+    document.getElementById(id).oninput = loadCashier;
+});
+
+// 分析中心穿透跳转：/cashier_history?date=YYYY-MM-DD → 直接定位到该营业日（自定义区间）
+(function () {
+    const urlParams = new URLSearchParams(window.location.search);
+    const d = urlParams.get('date');
+    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+        CASHIER_STATE.preset = 'custom';
+        document.getElementById('customStart').value = d;
+        document.getElementById('customEnd').value = d;
+        document.getElementById('customRange').style.display = 'block';
+        document.querySelectorAll('#presetGroup button').forEach(x => x.classList.remove('active'));
+        const btn = document.querySelector('#presetGroup button[data-preset="custom"]');
+        if (btn) btn.classList.add('active');
+    }
+})();
+loadCashier();
+</script>
+{% endblock %}

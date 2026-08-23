@@ -21,6 +21,7 @@ from config import (MACHINE_TYPE_LABELS, MACHINE_MAX_PLAYERS, LOTTERY_TYPES,
                     CI_SCORE_WEIGHTS, CI_SCORE_DIM_LABELS, CI_MARKETING_TYPES, CI_OPERATING_STATUS)
 import config
 import payment as payment_module
+import revenue
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
@@ -558,17 +559,23 @@ def api_close_session(session_id):
 
     duration_minutes = round((end_time - start_time).total_seconds() / 60)
 
+    # V1.6: 真实实收归属日 = 按结账/支付时间（effective_end_time 落点），非 start_time
+    biz_dt = revenue.business_date_for(end_time)
+    paid_at = revenue.shanghai_now().isoformat(timespec='seconds')
+
     db.execute(
         '''UPDATE sessions SET end_time=?, duration_minutes=?, fee=?, fee_breakdown=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
            payment_method=?, status="closed",
-           actual_end_time=?, end_time_confirmed=1, end_time_confirmed_at=?
+           actual_end_time=?, end_time_confirmed=1, end_time_confirmed_at=?,
+           business_date=?, paid_at=?, operator=?
            WHERE id=?''',
         [end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          discount_type, discount_id, discount_amount, final_fee,
          payment_method,
          end_time.isoformat(), datetime.now().isoformat(),
+         biz_dt, paid_at, g.user['name'],
          session_id]
     )
     db.execute('UPDATE machines SET status="idle" WHERE id=?', [sess['machine_id']])
@@ -578,8 +585,8 @@ def api_close_session(session_id):
     # 更新商品销售记录的支付方式和会员ID，并将本桌未结算挂账置为已结算
     if product_total > 0:
         db.execute(
-            "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=? WHERE session_id=? AND status='UNSETTLED'",
-            [datetime.now().isoformat(), payment_method, member_id, session_id]
+            "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=?, business_date=? WHERE session_id=? AND status='UNSETTLED'",
+            [datetime.now().isoformat(), payment_method, member_id, biz_dt, session_id]
         )
 
     db.commit()
@@ -1126,17 +1133,23 @@ def api_player_checkout(session_id, sp_id):
 
     duration_minutes = round((end_time - start_time).total_seconds() / 60)
 
+    # V1.6: 单人结账按各自真实支付时间归属营业日
+    sp_biz_dt = revenue.business_date_for(end_time)
+    sp_paid_at = revenue.shanghai_now().isoformat(timespec='seconds')
+
     # 更新 session_player
     db.execute(
         '''UPDATE session_players SET start_time=?, is_overnight=?, end_time=?, duration_minutes=?, fee=?, fee_breakdown=?,
            manual_discount_type=?, manual_discount_value=?, manual_discount_amount=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
-           product_total=?, grand_total=?, payment_method=?, status="checked_out" WHERE id=?''',
+           product_total=?, grand_total=?, payment_method=?, status="checked_out",
+           business_date=?, paid_at=?, operator=? WHERE id=?''',
         [start_time.isoformat(), 1 if effective_is_overnight else 0, end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          manual_discount_type, manual_discount_value, manual_discount_amount,
          discount_type, discount_id, discount_amount, final_fee,
-         product_total, grand_total, payment_method, sp_id]
+         product_total, grand_total, payment_method,
+         sp_biz_dt, sp_paid_at, g.user['name'], sp_id]
     )
 
     # 标记优惠券已用
@@ -1145,8 +1158,8 @@ def api_player_checkout(session_id, sp_id):
 
     # 结算该玩家本场未结算挂账（置为已结算，防止重复计费）
     db.execute(
-        "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=? WHERE session_player_id=? AND status='UNSETTLED'",
-        [datetime.now().isoformat(), payment_method, member_id, sp_id]
+        "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=?, business_date=? WHERE session_player_id=? AND status='UNSETTLED'",
+        [datetime.now().isoformat(), payment_method, member_id, sp_biz_dt, sp_id]
     )
 
     # 检查是否所有人都已结账
@@ -1155,10 +1168,10 @@ def api_player_checkout(session_id, sp_id):
     ).fetchone()['cnt']
 
     if remaining == 0:
-        # 所有人都结账了，关闭台桌
+        # 所有人都结账了，关闭台桌；session 营业日取最后结账玩家时间
         db.execute(
-            'UPDATE sessions SET end_time=?, status="closed", actual_end_time=?, end_time_confirmed=1 WHERE id=?',
-            [end_time.isoformat(), end_time.isoformat(), session_id]
+            'UPDATE sessions SET end_time=?, status="closed", actual_end_time=?, end_time_confirmed=1, business_date=?, paid_at=?, operator=? WHERE id=?',
+            [end_time.isoformat(), end_time.isoformat(), sp_biz_dt, sp_paid_at, g.user['name'], session_id]
         )
         db.execute('UPDATE machines SET status="idle" WHERE id=?', [sess['machine_id']])
 
@@ -1252,12 +1265,15 @@ def api_sell_product():
         if sp_row and sp_row['player_id']:
             player_id = sp_row['player_id']
     # 结算状态：挂账到玩家场次 = 未结算(UNSETTLED)；纯柜台即时售卖(无场次玩家) = 立即结算(SETTLED)
+    # V1.6: 柜台即时售卖也要写 business_date（按售卖/结算时间归属营业日），否则进不了收银流水
     if session_player_id:
         sale_status = 'UNSETTLED'
         settled_at = None
+        biz_dt = None
     else:
         sale_status = 'SETTLED'
         settled_at = datetime.now().isoformat()
+        biz_dt = revenue.business_date_for(settled_at)
 
     now = datetime.now().isoformat()
     is_custom = data.get('is_custom', False)
@@ -1272,9 +1288,9 @@ def api_sell_product():
         total = round(price * qty, 2)
 
         db.execute(
-            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, business_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [session_id, session_player_id, player_id, None, custom_name, custom_category, price, qty, total,
-             1, custom_category, data.get('payment_method'), member_id, sale_status, settled_at, now]
+             1, custom_category, data.get('payment_method'), member_id, sale_status, settled_at, biz_dt, now]
         )
     else:
         product = db.execute('SELECT * FROM products WHERE id=?', [data['product_id']]).fetchone()
@@ -1284,9 +1300,9 @@ def api_sell_product():
         total = round(product['price'] * qty, 2)
 
         db.execute(
-            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO product_sales (session_id, session_player_id, player_id, product_id, product_name, category, price, quantity, total, is_custom, custom_category, payment_method, member_id, status, settled_at, business_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [session_id, session_player_id, player_id, product['id'], product['name'], product['category'], product['price'], qty, total,
-             0, None, data.get('payment_method'), member_id, sale_status, settled_at, now]
+             0, None, data.get('payment_method'), member_id, sale_status, settled_at, biz_dt, now]
         )
 
         # 更新库存
@@ -3784,6 +3800,402 @@ def api_analytics_export_excel():
             headers={'Content-Disposition': f'attachment; filename="{name}"'}
         )
     except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ===================== V1.6 收银流水 + 作废/恢复/安全删除 =====================
+
+def _machine_name(db, machine_id):
+    m = db.execute('SELECT name FROM machines WHERE id=?', [machine_id]).fetchone()
+    return m['name'] if m else (machine_id or '')
+
+
+def _machine_type(db, machine_id):
+    m = db.execute('SELECT type FROM machines WHERE id=?', [machine_id]).fetchone()
+    return m['type'] if m else '8port'
+
+
+def _build_cashier_data(db, filters):
+    """构建收银流水视图数据（玩家流水 + 桌局汇总 + 合计）。
+
+    统一来自 revenue.iter_real_settlements（与分析中心 GMV 穿透一致）；
+    另含 legacy 历史导入已结账桌（business_date 为空），标记为 历史/未知。
+    """
+    preset = filters.get('preset') or 'today'
+    custom_start = filters.get('custom_start')
+    custom_end = filters.get('custom_end')
+    start, end = analytics_mod.resolve_range(preset, custom_start, custom_end)
+    void_mode = filters.get('void') or 'normal'   # normal / voided / all
+    include_voided = (void_mode == 'all')
+
+    player_q = (filters.get('player') or '').strip()
+    pay_method = (filters.get('payment') or '').strip()
+    port = (filters.get('port') or '').strip()
+    overnight = (filters.get('overnight') or '').strip()
+    operator = (filters.get('operator') or '').strip()
+    machine_id = (filters.get('machine') or '').strip()
+
+    rows = revenue.iter_real_settlements(db, business_date=None, include_voided=include_voided)
+    items = [dict(r) for r in rows]
+
+    # legacy 历史导入（已结账但无 business_date）
+    if void_mode != 'voided':
+        leg = db.execute(
+            "SELECT * FROM sessions WHERE status='closed' AND business_date IS NULL "
+            "AND (source_id IS NOT NULL OR time_precision='date_only')"
+        ).fetchall()
+        for s in leg:
+            s = dict(s)
+            st = s.get('start_time') or ''
+            items.append({
+                'kind': 'legacy', 'sp_id': None, 'session_id': s['id'],
+                'machine_id': s['machine_id'], 'player_name': '', 'player_id': None,
+                'start_time': s.get('start_time'), 'end_time': s.get('end_time'),
+                'duration_minutes': s.get('duration_minutes'),
+                'fee': s.get('fee'), 'final_fee': s.get('final_fee'),
+                'product_total': 0, 'discount_amount': s.get('discount_amount'),
+                'grand_total': s.get('final_fee'),
+                'payment_method': None,
+                'business_date': st[:10] if len(st) >= 10 else None,
+                'paid_at': s.get('end_time'), 'is_voided': 0,
+                'is_overnight': s.get('is_overnight'),
+                'machine_name': _machine_name(db, s['machine_id']),
+                'machine_type': _machine_type(db, s['machine_id']),
+                'void_reason': None, 'voided_by': None, 'voided_at': None,
+                'payment_label': '历史/未知', 'operator': '历史导入', 'legacy': True,
+            })
+
+    # 统一过滤
+    filtered = []
+    for r in items:
+        r = dict(r)
+        if r.get('legacy'):
+            r['payment_label'] = '历史/未知'
+            r['operator'] = '历史导入'
+        else:
+            r['payment_label'] = PAYMENT_METHODS.get(r.get('payment_method'), r.get('payment_method') or '')
+        bd = r.get('business_date')
+        if bd is None or bd < start or bd > end:
+            continue
+        if void_mode == 'normal' and r.get('is_voided'):
+            continue
+        if void_mode == 'voided' and not r.get('is_voided'):
+            continue
+        if player_q and player_q not in (r.get('player_name') or ''):
+            continue
+        if pay_method and pay_method != (r.get('payment_method') or ''):
+            continue
+        if port:
+            want = '8port' if port == '8' else '4port'
+            if (r.get('machine_type') or '') != want:
+                continue
+        if overnight:
+            is_on = 1 if r.get('is_overnight') else 0
+            if str(is_on) != overnight:
+                continue
+        if operator and operator != (r.get('operator') or ''):
+            continue
+        if machine_id and str(r.get('machine_id')) != machine_id:
+            continue
+        filtered.append(r)
+
+    # 桌局汇总（按 session 分组；session 型直接汇总，player 型聚合）
+    summary = {}
+    legacy_summary = []
+    for r in filtered:
+        if r.get('legacy'):
+            legacy_summary.append(r)
+            continue
+        sid = r['session_id']
+        if r['kind'] == 'session':
+            summary[sid] = {
+                'session_id': sid, 'machine_name': r.get('machine_name'),
+                'machine_type': r.get('machine_type'), 'players': r.get('player_name') or '',
+                'start_time': r.get('start_time'), 'end_time': r.get('end_time'),
+                'fee': r.get('fee') or 0, 'product_total': r.get('product_total') or 0,
+                'discount_amount': r.get('discount_amount') or 0,
+                'grand_total': r.get('grand_total') or 0,
+                'payment_label': r.get('payment_label'), 'business_date': r.get('business_date'),
+                'is_voided': r.get('is_voided'), 'is_overnight': r.get('is_overnight'),
+                'operator': r.get('operator'),
+            }
+        else:
+            cur = summary.get(sid)
+            if cur is None:
+                summary[sid] = {
+                    'session_id': sid, 'machine_name': r.get('machine_name'),
+                    'machine_type': r.get('machine_type'), 'players': (r.get('player_name') or ''),
+                    'start_time': r.get('start_time'), 'end_time': r.get('end_time'),
+                    'fee': 0, 'product_total': 0, 'discount_amount': 0, 'grand_total': 0,
+                    'payment_label': r.get('payment_label'), 'business_date': r.get('business_date'),
+                    'is_voided': r.get('is_voided'), 'is_overnight': r.get('is_overnight'),
+                    'operator': r.get('operator'),
+                }
+                cur = summary[sid]
+            else:
+                if r.get('player_name'):
+                    cur['players'] = (cur['players'] + ', ' + r['player_name']) if cur['players'] else r['player_name']
+            cur['fee'] = round(float(cur['fee']) + float(r.get('fee') or 0), 2)
+            cur['product_total'] = round(float(cur['product_total']) + float(r.get('product_total') or 0), 2)
+            cur['discount_amount'] = round(float(cur['discount_amount']) + float(r.get('discount_amount') or 0), 2)
+            cur['grand_total'] = round(float(cur['grand_total']) + float(r.get('grand_total') or 0), 2)
+
+    # 合计（真实实收，不含 legacy；void 视图含已作废）
+    real_items = [r for r in filtered if not r.get('legacy')]
+    total_real = round(sum(float(r.get('grand_total') or 0) for r in real_items), 2)
+    total_fee = round(sum(float(r.get('fee') or 0) for r in real_items), 2)
+    total_product = round(sum(float(r.get('product_total') or 0) for r in real_items), 2)
+    total_discount = round(sum(float(r.get('discount_amount') or 0) for r in real_items), 2)
+
+    return {
+        'rows': filtered,
+        'session_summary': list(summary.values()) + legacy_summary,
+        'totals': {
+            'count': len(real_items), 'real_paid': total_real,
+            'fee': total_fee, 'product': total_product, 'discount': total_discount,
+        },
+        'range': {'start': start, 'end': end, 'preset': preset, 'void_mode': void_mode},
+    }
+
+
+@app.route('/cashier_history')
+@role_required('dashboard')
+def page_cashier_history():
+    return render_template('cashier_history.html', active_page='cashier_history', user=g.user)
+
+
+@app.route('/api/cashier_history')
+@role_required('dashboard')
+def api_cashier_history():
+    filters = {
+        'preset': request.args.get('preset', 'today'),
+        'custom_start': request.args.get('custom_start'),
+        'custom_end': request.args.get('custom_end'),
+        'player': request.args.get('player'),
+        'payment': request.args.get('payment'),
+        'port': request.args.get('port'),
+        'overnight': request.args.get('overnight'),
+        'operator': request.args.get('operator'),
+        'machine': request.args.get('machine'),
+        'void': request.args.get('void', 'normal'),
+    }
+    try:
+        data = _build_cashier_data(g.db, filters)
+        return jsonify({'status': 'ok', 'data': data})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/cashier_history/detail')
+@role_required('dashboard')
+def api_cashier_history_detail():
+    session_id = request.args.get('session_id', type=int)
+    if not session_id:
+        return jsonify({'status': 'error', 'message': '缺少 session_id'}), 400
+    db = g.db
+    sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if not sess:
+        return jsonify({'status': 'error', 'message': '桌局不存在'}), 404
+    sess = dict(sess)
+    players = [dict(r) for r in db.execute(
+        'SELECT * FROM session_players WHERE session_id=? ORDER BY id', [session_id]).fetchall()]
+    products = [dict(r) for r in db.execute(
+        'SELECT * FROM product_sales WHERE session_id=? ORDER BY id', [session_id]).fetchall()]
+    sp_ids = [p['id'] for p in players]
+    payments = []
+    if sp_ids:
+        payments = [dict(r) for r in db.execute(
+            'SELECT * FROM payments WHERE session_player_id IN (%s)' % ','.join('?' * len(sp_ids)),
+            sp_ids).fetchall()]
+    audit = [dict(r) for r in db.execute(
+        'SELECT * FROM cashier_audit WHERE session_id=? ORDER BY id', [session_id]).fetchall()]
+
+    # V1.6 补充：桌局「实际时长」展示。
+    # 复用 overnight.effective_end_time 的统一结束时间逻辑（actual_end_time > auto_end_at(已触发) > end_time > now），
+    # 不在前端另写时间优先级。闭桌且无 actual_end_time 时以 end_time 兜底，避免回落到实时 now 导致时长错误。
+    def _parse_dt(s):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+
+    _real_now = datetime.now()
+    if sess.get('status') == 'closed' and not sess.get('actual_end_time'):
+        _end_dt = _parse_dt(sess.get('end_time'))
+        _eff_now = _end_dt or _real_now
+    else:
+        _eff_now = _real_now
+    _eff_end = overnight.effective_end_time(sess, now=_eff_now)
+    sess['effective_end_time'] = _eff_end.isoformat() if _eff_end else None
+    _start = _parse_dt(sess.get('start_time'))
+    if _start and _eff_end:
+        sess['actual_duration_minutes'] = max(0, round((_eff_end - _start).total_seconds() / 60, 1))
+    else:
+        sess['actual_duration_minutes'] = None
+    for _p in players:
+        _p_start = _parse_dt(_p.get('start_time'))
+        if _p_start and _eff_end:
+            _p['actual_duration_minutes'] = max(0, round((_eff_end - _p_start).total_seconds() / 60, 1))
+        else:
+            _p['actual_duration_minutes'] = _p.get('duration_minutes')
+
+    return jsonify({
+        'status': 'ok',
+        'session': sess,
+        'players': players,
+        'products': products,
+        'payments': payments,
+        'audit': audit,
+    })
+
+
+@app.route('/api/cashier_history/export')
+@role_required('dashboard')
+def api_cashier_history_export():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    filters = {
+        'preset': request.args.get('preset', 'today'),
+        'custom_start': request.args.get('custom_start'),
+        'custom_end': request.args.get('custom_end'),
+        'player': request.args.get('player'),
+        'payment': request.args.get('payment'),
+        'port': request.args.get('port'),
+        'overnight': request.args.get('overnight'),
+        'operator': request.args.get('operator'),
+        'machine': request.args.get('machine'),
+        'void': request.args.get('void', 'normal'),
+    }
+    data = _build_cashier_data(g.db, filters)
+    rows = [r for r in data['rows'] if not r.get('legacy')]
+
+    wb = Workbook()
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill('solid', fgColor='2C5F2D')
+
+    # Sheet1 玩家收银流水
+    ws = wb.active
+    ws.title = '玩家收银流水'
+    headers = ['日期', '结账时间', '桌号', '玩家', 'player_id', '四口/八口', '是否通宵',
+               '开台时间', '结束时间', '实际时长', '台费', '商品消费', '优惠', '应收',
+               '实收', '支付方式', '操作员', 'session_id', '是否作废', '作废原因']
+    ws.append(headers)
+    for c in range(1, len(headers) + 1):
+        ws.cell(row=1, column=c).font = header_font
+        ws.cell(row=1, column=c).fill = header_fill
+    for r in rows:
+        port_label = '八口' if (r.get('machine_type') == '8port') else ('四口' if r.get('machine_type') == '4port' else '')
+        ws.append([
+            r.get('business_date'), r.get('paid_at'), r.get('machine_name'), r.get('player_name'),
+            r.get('player_id'), port_label, '是' if r.get('is_overnight') else '否',
+            r.get('start_time'), r.get('end_time'), r.get('duration_minutes'),
+            r.get('fee'), r.get('product_total'), r.get('discount_amount'),
+            r.get('grand_total'), r.get('grand_total'), r.get('payment_label'),
+            r.get('operator'), r.get('session_id'),
+            '是' if r.get('is_voided') else '否', r.get('void_reason') or '',
+        ])
+
+    # Sheet2 商品明细（按桌去重，避免同一桌的 session 行与 product 行重复展开）
+    ws2 = wb.create_sheet('商品明细')
+    ws2.append(['日期', '桌号', '玩家', '商品名', '数量', '单价', '金额', '支付方式', 'session_id'])
+    for c in range(1, 10):
+        ws2.cell(row=1, column=c).font = header_font
+        ws2.cell(row=1, column=c).fill = header_fill
+    seen_sessions = set()
+    for r in rows:
+        if r['session_id'] in seen_sessions:
+            continue
+        seen_sessions.add(r['session_id'])
+        prods = g.db.execute(
+            'SELECT * FROM product_sales WHERE session_id=? ORDER BY id',
+            [r['session_id']]).fetchall()
+        for p in prods:
+            p = dict(p)
+            ws2.append([
+                r.get('business_date'), r.get('machine_name'), r.get('player_name'),
+                p.get('product_name'), p.get('quantity'), p.get('price'), p.get('total'),
+                PAYMENT_METHODS.get(p.get('payment_method'), p.get('payment_method') or ''),
+                r.get('session_id'),
+            ])
+
+    # Sheet3 桌局汇总
+    ws3 = wb.create_sheet('桌局汇总')
+    ws3.append(['桌号', '玩家', '开台', '结束', '台费', '商品', '优惠', '实收', '支付方式', '营业日', '是否作废'])
+    for c in range(1, 12):
+        ws3.cell(row=1, column=c).font = header_font
+        ws3.cell(row=1, column=c).fill = header_fill
+    for s in data['session_summary']:
+        ws3.append([
+            s.get('machine_name'), s.get('players'), s.get('start_time'), s.get('end_time'),
+            s.get('fee'), s.get('product_total'), s.get('discount_amount'), s.get('grand_total'),
+            s.get('payment_label'), s.get('business_date'),
+            '是' if s.get('is_voided') else '否',
+        ])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        buf.getvalue(),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="收银流水_{filters.get("preset", "today")}.xlsx"'}
+    )
+
+
+@app.route('/api/sessions/<int:session_id>/void', methods=['POST'])
+@role_required('dashboard')
+def api_void_session(session_id):
+    if g.user['role'] != 'admin':
+        return jsonify({'status': 'error', 'message': '仅管理员可作废'}), 403
+    data = request.get_json(silent=True) or {}
+    reason = data.get('reason', 'TEST_DATA')
+    if reason not in revenue.VALID_VOID_REASONS:
+        reason = 'OTHER'
+    try:
+        sess = revenue.void_session(g.db, session_id, reason, g.user['name'])
+        if sess is None:
+            return jsonify({'status': 'error', 'message': '桌局不存在'}), 404
+        g.db.commit()
+        return jsonify({'status': 'ok', 'session': dict(sess)})
+    except Exception as e:
+        g.db.rollback()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sessions/<int:session_id>/restore', methods=['POST'])
+@role_required('dashboard')
+def api_restore_session(session_id):
+    if g.user['role'] != 'admin':
+        return jsonify({'status': 'error', 'message': '仅管理员可恢复'}), 403
+    try:
+        sess = revenue.restore_session(g.db, session_id, g.user['name'])
+        if sess is None:
+            return jsonify({'status': 'error', 'message': '桌局不存在'}), 404
+        g.db.commit()
+        return jsonify({'status': 'ok', 'session': dict(sess)})
+    except Exception as e:
+        g.db.rollback()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sessions/<int:session_id>/permanent-delete', methods=['POST'])
+@role_required('dashboard')
+def api_permanent_delete_session(session_id):
+    if g.user['role'] != 'admin':
+        return jsonify({'status': 'error', 'message': '仅管理员可永久删除'}), 403
+    data = request.get_json(silent=True) or {}
+    confirmed = bool(data.get('confirmed'))
+    try:
+        ok, code, msg = revenue.permanently_delete_session(
+            g.db, session_id, g.user['name'], confirmed=confirmed)
+        if not ok:
+            return jsonify({'status': 'error', 'code': code, 'message': msg}), 400
+        g.db.commit()
+        return jsonify({'status': 'ok', 'message': msg})
+    except Exception as e:
+        g.db.rollback()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

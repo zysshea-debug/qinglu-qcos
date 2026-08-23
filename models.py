@@ -801,6 +801,60 @@ def init_db():
         )'''
     )
 
+    # ===== V1.6: 营业日口径 + 作废/恢复/安全删除 =====
+    # business_date: 真实实收归属日（按支付/结账时间，非 start_time）
+    # paid_at:       真实结账时间
+    # is_voided/void_*: 作废标记（不物理删除，保留原始金额/支付方式/时间）
+    s_cols = db.execute('PRAGMA table_info(sessions)').fetchall()
+    s_col_names = [c['name'] for c in s_cols]
+    for col_name, col_type in [
+        ('business_date', 'TEXT'),
+        ('paid_at', 'TEXT'),
+        ('operator', 'TEXT'),
+        ('is_voided', 'INTEGER DEFAULT 0'),
+        ('voided_at', 'TEXT'),
+        ('voided_by', 'TEXT'),
+        ('void_reason', 'TEXT'),
+    ]:
+        if col_name not in s_col_names:
+            db.execute(f'ALTER TABLE sessions ADD COLUMN {col_name} {col_type}')
+
+    # session_players: 单人结账也按各自 business_date 归属（多人分别结账）
+    sp_cols = db.execute('PRAGMA table_info(session_players)').fetchall()
+    sp_col_names = [c['name'] for c in sp_cols]
+    for col_name, col_type in [
+        ('business_date', 'TEXT'),
+        ('paid_at', 'TEXT'),
+        ('operator', 'TEXT'),
+        ('is_voided', 'INTEGER DEFAULT 0'),
+    ]:
+        if col_name not in sp_col_names:
+            db.execute(f'ALTER TABLE session_players ADD COLUMN {col_name} {col_type}')
+
+    # product_sales: 柜台商品也按 business_date 归属 + 可作废
+    ps_cols = db.execute('PRAGMA table_info(product_sales)').fetchall()
+    ps_col_names = [c['name'] for c in ps_cols]
+    for col_name, col_type in [
+        ('business_date', 'TEXT'),
+        ('is_voided', 'INTEGER DEFAULT 0'),
+    ]:
+        if col_name not in ps_col_names:
+            db.execute(f'ALTER TABLE product_sales ADD COLUMN {col_name} {col_type}')
+
+    # 收银流水审计表（作废/恢复/永久删除均留痕，含删除前完整快照）
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS cashier_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,            -- void / restore / delete
+            session_id INTEGER,
+            operator TEXT,
+            reason TEXT,
+            snapshot TEXT,                    -- JSON 完整快照（删除前/操作前）
+            changed_at TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )'''
+    )
+
     # 插入默认机器
     for m in MACHINES:
         existing = db.execute('SELECT id FROM machines WHERE id=?', [m['id']]).fetchone()

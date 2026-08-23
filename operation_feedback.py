@@ -23,6 +23,8 @@ from datetime import datetime, date, timedelta
 
 from operations import TASK_TYPE_LABELS, _refresh_pending, _today, _parse_dt
 from table_learning import recompute_pair_stats, CONFLICT_TYPE_LABELS
+import revenue
+import overnight
 
 # 反馈评分字段（1-5）
 FEEDBACK_FIELDS = ['atmosphere_score', 'compatibility_score', 'table_quality_score',
@@ -215,21 +217,12 @@ def get_feedback(db, session_id=None, limit=50):
 # ===================== 运营复盘 =====================
 
 def _gmv_on_date(db, date_str):
-    """指定日期 GMV = 台费实收 + 商品（不含充值）。"""
-    sids = [s['id'] for s in db.execute(
-        "SELECT id FROM sessions WHERE status='closed' AND date(start_time)=?", [date_str]
-    ).fetchall()]
-    fee_total = 0.0
-    if sids:
-        sp = db.execute(
-            'SELECT SUM(grand_total) t, SUM(final_fee) f FROM session_players WHERE session_id IN (%s)'
-            % ','.join('?' * len(sids)), sids
-        ).fetchone()
-        fee_total = float(sp['t'] or sp['f'] or 0)
-    prod = db.execute(
-        'SELECT SUM(total) t FROM product_sales WHERE date(created_at)=?', [date_str]
-    ).fetchone()['t'] or 0
-    return round(float(fee_total) + float(prod), 2)
+    """指定日期真实实收 GMV（V1.6 新口径）。
+
+    一律按 business_date（真实支付/结账时间归属日），排除 is_voided=1。
+    与收银流水 / 分析中心穿透一致。
+    """
+    return revenue.real_gmv(db, date_str, include_voided=False)
 
 
 def _session_avg_of(db, session_id):
@@ -239,15 +232,49 @@ def _session_avg_of(db, session_id):
     return (f['atmosphere_score'] + f['compatibility_score'] + f['table_quality_score']) / 3.0
 
 
+def _table_hours_on_date(db, date_str):
+    """当日桌时（分钟）：对当日开台的桌，跨午夜拆分到 date_str 自然日。
+
+    active 桌用 overnight.effective_end_time(now) 截止；整台用 end_time。
+    """
+    rows = db.execute(
+        "SELECT * FROM sessions WHERE date(start_time)=?", [date_str]
+    ).fetchall()
+    total = 0.0
+    now = revenue.shanghai_now()
+    for r in rows:
+        r = dict(r)
+        start = revenue._as_dt(r['start_time'])
+        if start is None:
+            continue
+        if r['status'] == 'closed' and r.get('end_time'):
+            end = revenue._as_dt(r['end_time'])
+        else:
+            end = overnight.effective_end_time(r, now=now)
+        if end is None or end <= start:
+            continue
+        split = revenue.split_session_duration_by_date(start, end)
+        total += split.get(date_str, 0.0)
+    return total
+
+
 def get_operation_review(db, date_str=None):
     """指定日期经营复盘聚合。默认昨天。"""
     if not date_str:
         date_str = (_today() - timedelta(days=1)).isoformat()
 
     gmv = _gmv_on_date(db, date_str)
-    sessions = db.execute(
+    # V1.6 口径区分：
+    #  sessions_opened  = 当日发生过的桌局数（按开台日，含跨午夜）
+    #  closed_sessions  = 当日结账桌数（按 business_date）
+    #  table_hours      = 当日桌时（跨午夜拆分到自然日，active 用 now 截止）
+    sessions_opened = db.execute(
         "SELECT COUNT(*) c FROM sessions WHERE date(start_time)=?", [date_str]
     ).fetchone()['c']
+    closed_sessions = db.execute(
+        "SELECT COUNT(*) c FROM sessions WHERE business_date=? AND status='closed'", [date_str]
+    ).fetchone()['c']
+    table_hours = _table_hours_on_date(db, date_str)
     # 平均桌局质量（当天有反馈的桌）
     fbs = db.execute(
         "SELECT * FROM session_feedback f JOIN sessions s ON f.session_id=s.id WHERE date(s.start_time)=?",
@@ -294,7 +321,10 @@ def get_operation_review(db, date_str=None):
     return {
         'date': date_str,
         'gmv': gmv,
-        'sessions': sessions,
+        'sessions_opened': sessions_opened,
+        'closed_sessions': closed_sessions,
+        'table_hours': round(table_hours, 2),
+        'sessions': sessions_opened,
         'feedback_count': len(fbs),
         'average_table_score': avg_quality,
         'conflict_tables': conflict_fb,
@@ -398,7 +428,7 @@ def generate_daily_snapshot(db, date_str=None):
 
     gmv = _gmv_on_date(db, date_str)
     sessions = db.execute(
-        "SELECT COUNT(*) c FROM sessions WHERE date(start_time)=?", [date_str]
+        "SELECT COUNT(*) c FROM sessions WHERE business_date=? AND status='closed'", [date_str]
     ).fetchone()['c']
 
     pt = db.execute(

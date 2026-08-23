@@ -79,10 +79,13 @@ def add_player(name, **kw):
 
 def add_session(pid_list, start=TODAY_STR + ' 20:00:00', machine_id=1, status='closed',
                 duration=120, grand_total=0.0, final_fee=0.0, overnight=False):
+    # V1.6 口径：真实结账必须写 business_date/paid_at（按结账时间归属营业日）。
+    # 夹具模拟一次真实整台结账：business_date = 结束(开台)当天，paid_at = 结账时间。
+    bd = (start[:10] if start else TODAY_STR)
     cur = DB.execute(
-        'INSERT INTO sessions (machine_id, start_time, status, duration_minutes, fee, final_fee) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        [machine_id, start, status, duration, final_fee, final_fee])
+        'INSERT INTO sessions (machine_id, start_time, status, duration_minutes, fee, final_fee, business_date, paid_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [machine_id, start, status, duration, final_fee, final_fee, bd, start])
     sid = cur.lastrowid
     DB.commit()
     n = max(1, len(pid_list))
