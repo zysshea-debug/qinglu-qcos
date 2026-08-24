@@ -3818,15 +3818,21 @@ def _machine_type(db, machine_id):
 def _build_cashier_data(db, filters):
     """构建收银流水视图数据（玩家流水 + 桌局汇总 + 合计）。
 
-    统一来自 revenue.iter_real_settlements（与分析中心 GMV 穿透一致）；
-    另含 legacy 历史导入已结账桌（business_date 为空），标记为 历史/未知。
+    统一来自 revenue.iter_settlement_rows（normalized）：
+      - NATIVE_V16：真实实收（business_date 严格，计入 GMV）
+      - NATIVE_PRE_V16：V1.6 之前原生结账（无 business_date/paid_at）→ 历史兼容
+      - LEGACY_IMPORT：Excel 历史导入（completed/closed 均兼容）→ 历史兼容
+    历史兼容行带 source_type / historical_compat / visibility_state 等标记，
+    只做「历史可见」，不计入真实实收合计（totals.real_* 仅 NATIVE_V16）。
     """
     preset = filters.get('preset') or 'today'
     custom_start = filters.get('custom_start')
     custom_end = filters.get('custom_end')
     start, end = analytics_mod.resolve_range(preset, custom_start, custom_end)
     void_mode = filters.get('void') or 'normal'   # normal / voided / all
-    include_voided = (void_mode == 'all')
+    # voided / all 视图都需要包含已作废记录（SQL 层不排除），
+    # 再由下方过滤逻辑按视图模式挑出对应子集
+    include_voided = (void_mode in ('voided', 'all'))
 
     player_q = (filters.get('player') or '').strip()
     pay_method = (filters.get('payment') or '').strip()
@@ -3835,43 +3841,20 @@ def _build_cashier_data(db, filters):
     operator = (filters.get('operator') or '').strip()
     machine_id = (filters.get('machine') or '').strip()
 
-    rows = revenue.iter_real_settlements(db, business_date=None, include_voided=include_voided)
-    items = [dict(r) for r in rows]
-
-    # legacy 历史导入（已结账但无 business_date）
-    if void_mode != 'voided':
-        leg = db.execute(
-            "SELECT * FROM sessions WHERE status='closed' AND business_date IS NULL "
-            "AND (source_id IS NOT NULL OR time_precision='date_only')"
-        ).fetchall()
-        for s in leg:
-            s = dict(s)
-            st = s.get('start_time') or ''
-            items.append({
-                'kind': 'legacy', 'sp_id': None, 'session_id': s['id'],
-                'machine_id': s['machine_id'], 'player_name': '', 'player_id': None,
-                'start_time': s.get('start_time'), 'end_time': s.get('end_time'),
-                'duration_minutes': s.get('duration_minutes'),
-                'fee': s.get('fee'), 'final_fee': s.get('final_fee'),
-                'product_total': 0, 'discount_amount': s.get('discount_amount'),
-                'grand_total': s.get('final_fee'),
-                'payment_method': None,
-                'business_date': st[:10] if len(st) >= 10 else None,
-                'paid_at': s.get('end_time'), 'is_voided': 0,
-                'is_overnight': s.get('is_overnight'),
-                'machine_name': _machine_name(db, s['machine_id']),
-                'machine_type': _machine_type(db, s['machine_id']),
-                'void_reason': None, 'voided_by': None, 'voided_at': None,
-                'payment_label': '历史/未知', 'operator': '历史导入', 'legacy': True,
-            })
+    items = [dict(r) for r in revenue.iter_settlement_rows(db, include_voided=include_voided)]
 
     # 统一过滤
     filtered = []
     for r in items:
         r = dict(r)
-        if r.get('legacy'):
-            r['payment_label'] = '历史/未知'
-            r['operator'] = '历史导入'
+        if r.get('historical_compat'):
+            # 历史兼容：支付方式缺失不伪造；操作员缺失给「历史导入/历史未记录」
+            if r.get('payment_method'):
+                r['payment_label'] = PAYMENT_METHODS.get(r['payment_method'], r['payment_method'])
+            else:
+                r['payment_label'] = '历史/未知'
+            if not r.get('operator'):
+                r['operator'] = '历史导入' if r.get('source_type') == 'LEGACY_IMPORT' else '历史未记录'
         else:
             r['payment_label'] = PAYMENT_METHODS.get(r.get('payment_method'), r.get('payment_method') or '')
         bd = r.get('business_date')
@@ -3899,7 +3882,8 @@ def _build_cashier_data(db, filters):
             continue
         filtered.append(r)
 
-    # 桌局汇总（按 session 分组；session 型直接汇总，player 型聚合）
+    # 桌局汇总（按 session 分组；session 型直接汇总，player 型聚合；
+    # legacy 桌逐桌一行直接列出）
     summary = {}
     legacy_summary = []
     for r in filtered:
@@ -3918,6 +3902,9 @@ def _build_cashier_data(db, filters):
                 'payment_label': r.get('payment_label'), 'business_date': r.get('business_date'),
                 'is_voided': r.get('is_voided'), 'is_overnight': r.get('is_overnight'),
                 'operator': r.get('operator'),
+                'historical_compat': r.get('historical_compat') or 0,
+                'source_type': r.get('source_type'),
+                'visibility_state': r.get('visibility_state'),
             }
         else:
             cur = summary.get(sid)
@@ -3930,6 +3917,9 @@ def _build_cashier_data(db, filters):
                     'payment_label': r.get('payment_label'), 'business_date': r.get('business_date'),
                     'is_voided': r.get('is_voided'), 'is_overnight': r.get('is_overnight'),
                     'operator': r.get('operator'),
+                    'historical_compat': r.get('historical_compat') or 0,
+                    'source_type': r.get('source_type'),
+                    'visibility_state': r.get('visibility_state'),
                 }
                 cur = summary[sid]
             else:
@@ -3938,14 +3928,19 @@ def _build_cashier_data(db, filters):
             cur['fee'] = round(float(cur['fee']) + float(r.get('fee') or 0), 2)
             cur['product_total'] = round(float(cur['product_total']) + float(r.get('product_total') or 0), 2)
             cur['discount_amount'] = round(float(cur['discount_amount']) + float(r.get('discount_amount') or 0), 2)
-            cur['grand_total'] = round(float(cur['grand_total']) + float(r.get('grand_total') or 0), 2)
+            cur['grand_total'] = round(float(cur['grand_total'] or 0) + float(r.get('grand_total') or 0), 2)
 
-    # 合计（真实实收，不含 legacy；void 视图含已作废）
-    real_items = [r for r in filtered if not r.get('legacy')]
+    # 合计：真实实收仅 NATIVE_V16（historical_compat=0）；
+    # 历史兼容单独列（不计入真实 GMV）
+    real_items = [r for r in filtered if not r.get('historical_compat')]
+    history_items = [r for r in filtered if r.get('historical_compat')]
     total_real = round(sum(float(r.get('grand_total') or 0) for r in real_items), 2)
     total_fee = round(sum(float(r.get('fee') or 0) for r in real_items), 2)
     total_product = round(sum(float(r.get('product_total') or 0) for r in real_items), 2)
     total_discount = round(sum(float(r.get('discount_amount') or 0) for r in real_items), 2)
+    total_history = round(sum(
+        float(r.get('amount')) for r in history_items
+        if r.get('amount') is not None), 2)
 
     return {
         'rows': filtered,
@@ -3953,6 +3948,7 @@ def _build_cashier_data(db, filters):
         'totals': {
             'count': len(real_items), 'real_paid': total_real,
             'fee': total_fee, 'product': total_product, 'discount': total_discount,
+            'history_count': len(history_items), 'history_paid': total_history,
         },
         'range': {'start': start, 'end': end, 'preset': preset, 'void_mode': void_mode},
     }
@@ -4069,7 +4065,8 @@ def api_cashier_history_export():
         'void': request.args.get('void', 'normal'),
     }
     data = _build_cashier_data(g.db, filters)
-    rows = [r for r in data['rows'] if not r.get('legacy')]
+    # 导出全部行（含历史兼容），旧数据不能因缺字段无法导出
+    rows = data['rows']
 
     wb = Workbook()
     header_font = Font(bold=True, color='FFFFFF')
@@ -4080,21 +4077,28 @@ def api_cashier_history_export():
     ws.title = '玩家收银流水'
     headers = ['日期', '结账时间', '桌号', '玩家', 'player_id', '四口/八口', '是否通宵',
                '开台时间', '结束时间', '实际时长', '台费', '商品消费', '优惠', '应收',
-               '实收', '支付方式', '操作员', 'session_id', '是否作废', '作废原因']
+               '实收', '支付方式', '操作员', 'session_id', '是否作废', '作废原因',
+               '来源类型', '历史兼容', '可见状态', '日期来源', '金额来源']
     ws.append(headers)
     for c in range(1, len(headers) + 1):
         ws.cell(row=1, column=c).font = header_font
         ws.cell(row=1, column=c).fill = header_fill
     for r in rows:
         port_label = '八口' if (r.get('machine_type') == '8port') else ('四口' if r.get('machine_type') == '4port' else '')
+        paid_disp = (r.get('paid_at') or '')
+        if r.get('historical_compat') and not paid_disp:
+            paid_disp = '历史未记录'
         ws.append([
-            r.get('business_date'), r.get('paid_at'), r.get('machine_name'), r.get('player_name'),
+            r.get('business_date'), paid_disp, r.get('machine_name'), r.get('player_name'),
             r.get('player_id'), port_label, '是' if r.get('is_overnight') else '否',
             r.get('start_time'), r.get('end_time'), r.get('duration_minutes'),
             r.get('fee'), r.get('product_total'), r.get('discount_amount'),
             r.get('grand_total'), r.get('grand_total'), r.get('payment_label'),
             r.get('operator'), r.get('session_id'),
             '是' if r.get('is_voided') else '否', r.get('void_reason') or '',
+            r.get('source_type') or '', '是' if r.get('historical_compat') else '否',
+            r.get('visibility_state') or '', r.get('date_source') or '',
+            r.get('amount_source') or '',
         ])
 
     # Sheet2 商品明细（按桌去重，避免同一桌的 session 行与 product 行重复展开）
@@ -4122,8 +4126,8 @@ def api_cashier_history_export():
 
     # Sheet3 桌局汇总
     ws3 = wb.create_sheet('桌局汇总')
-    ws3.append(['桌号', '玩家', '开台', '结束', '台费', '商品', '优惠', '实收', '支付方式', '营业日', '是否作废'])
-    for c in range(1, 12):
+    ws3.append(['桌号', '玩家', '开台', '结束', '台费', '商品', '优惠', '实收', '支付方式', '营业日', '是否作废', '来源类型', '可见状态'])
+    for c in range(1, 15):
         ws3.cell(row=1, column=c).font = header_font
         ws3.cell(row=1, column=c).fill = header_fill
     for s in data['session_summary']:
@@ -4132,6 +4136,7 @@ def api_cashier_history_export():
             s.get('fee'), s.get('product_total'), s.get('discount_amount'), s.get('grand_total'),
             s.get('payment_label'), s.get('business_date'),
             '是' if s.get('is_voided') else '否',
+            s.get('source_type') or '', s.get('visibility_state') or '',
         ])
 
     buf = io.BytesIO()

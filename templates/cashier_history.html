@@ -179,7 +179,11 @@ function renderCashier(data) {
         <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
             <div class="small text-muted">商品</div><div class="fs-5">¥${fmt(t.product||0)}</div></div></div></div>
         <div class="col"><div class="card text-bg-light"><div class="card-body py-2">
-            <div class="small text-muted">优惠</div><div class="fs-5">¥${fmt(t.discount||0)}</div></div></div></div>`;
+            <div class="small text-muted">优惠</div><div class="fs-5">¥${fmt(t.discount||0)}</div></div></div></div>
+        ${(t.history_count||0)>0 ? `
+        <div class="col"><div class="card text-bg-secondary"><div class="card-body py-2">
+            <div class="small">历史兼容（${t.history_count||0} 笔，不计真实实收）</div>
+            <div class="fs-5">¥${fmt(t.history_paid||0)}</div></div></div></div>` : ''}`;
 
     const isAdmin = window.CURRENT_USER_ROLE === 'admin';
     const pb = document.getElementById('playerBody');
@@ -189,13 +193,13 @@ function renderCashier(data) {
         if (r.is_voided) tr.classList.add('table-danger');
         const port = r.machine_type === '8port' ? '八口' : (r.machine_type === '4port' ? '四口' : '');
         const status = r.is_voided ? `<span class="badge bg-danger">已作废</span>` :
-            (r.legacy ? `<span class="badge bg-secondary">历史</span>` : '');
+            (r.historical_compat ? `<span class="badge bg-secondary" title="来源:${r.source_type||''} 可见状态:${r.visibility_state||''}">历史兼容</span>` : '');
         tr.innerHTML = `
-            <td>${short(r.paid_at)}</td><td>${r.player_name||''}</td><td>${r.machine_name||''}</td>
+            <td>${paidCell(r)}</td><td>${r.player_name||''}</td><td>${r.machine_name||''}</td>
             <td>${port}</td><td>${r.is_overnight?'通宵':'普通'}</td>
             <td>${short(r.start_time)}</td><td>${short(r.end_time)}</td><td>${r.duration_minutes||''}</td>
             <td>¥${fmt(r.fee)}</td><td>¥${fmt(r.product_total)}</td><td>-¥${fmt(r.discount_amount)}</td>
-            <td>¥${fmt(r.grand_total)}</td><td>${r.payment_label||''}</td><td>${r.operator||''}</td>
+            <td>${money(r.grand_total)}</td><td>${r.payment_label||''}</td><td>${r.operator||''}</td>
             <td>${status}</td><td>${rowActions(r, isAdmin)}</td>`;
         pb.appendChild(tr);
     });
@@ -207,12 +211,12 @@ function renderCashier(data) {
         if (s.is_voided) tr.classList.add('table-danger');
         const port = s.machine_type === '8port' ? '八口' : (s.machine_type === '4port' ? '四口' : '');
         const status = s.is_voided ? `<span class="badge bg-danger">已作废</span>` :
-            (s.legacy ? `<span class="badge bg-secondary">历史</span>` : '');
+            (s.historical_compat ? `<span class="badge bg-secondary" title="来源:${s.source_type||''} 可见状态:${s.visibility_state||''}">历史兼容</span>` : '');
         tr.innerHTML = `
             <td>${s.machine_name||''}</td><td>${s.players||''}</td>
             <td>${short(s.start_time)}</td><td>${short(s.end_time)}</td>
             <td>¥${fmt(s.fee)}</td><td>¥${fmt(s.product_total)}</td><td>-¥${fmt(s.discount_amount)}</td>
-            <td>¥${fmt(s.grand_total)}</td><td>${s.payment_label||''}</td><td>${s.business_date||''}</td>
+            <td>${money(s.grand_total)}</td><td>${s.payment_label||''}</td><td>${s.business_date||''}</td>
             <td>${status}</td><td>${rowActions(s, isAdmin)}</td>`;
         sb.appendChild(tr);
     });
@@ -321,6 +325,19 @@ function exportCashier() {
 
 function fmt(v) { return Number(v||0).toFixed(2); }
 function short(s) { return s ? String(s).replace('T', ' ').slice(0, 16) : ''; }
+// 历史兼容金额：无可信金额时显示「未记录」，不伪装成 0 元
+function money(v) {
+    if (v === null || v === undefined || v === '') {
+        return '<span class="text-muted" title="历史金额未完整记录">未记录</span>';
+    }
+    return '¥' + fmt(v);
+}
+// 结账时间：paid_at 缺失（历史兼容）显示「历史未记录」，不伪造支付时间
+function paidCell(r) {
+    if (r.paid_at) return short(r.paid_at);
+    if (r.historical_compat) return '<span class="text-muted" title="真实支付时间历史未记录">历史未记录</span>';
+    return '';
+}
 function fmtDuration(min) {
     if (min === null || min === undefined || min === '') return '历史数据无精确时间';
     min = Number(min) || 0;

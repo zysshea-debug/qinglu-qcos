@@ -22,3 +22,5 @@ ck2.txt
 login_resp.txt
 *_resp.txt
 *_cookie*.txt
+*.db-wal
+*.db-journal

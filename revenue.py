@@ -17,6 +17,7 @@
 """
 
 from datetime import datetime, timedelta, date
+from collections import OrderedDict
 
 # ===================== 时区 / 日期助手 =====================
 
@@ -199,6 +200,258 @@ def iter_real_settlements(db, business_date=None, include_voided=False):
     return [dict(r) for r in rows]
 
 
+# ===================== 历史兼容统一视图（V1.6.1） =====================
+# 目标：V1.6 之前已存在的真实结账记录（NATIVE_PRE_V16）与 Excel 历史导入
+#       （LEGACY_IMPORT）不能因 business_date / paid_at 缺失而从收银流水消失。
+# 原则：
+#   - 不修改真实历史数据（不做 backfill）；
+#   - 不伪造 paid_at / payment_method；
+#   - 日期只用于「历史可见性」归档（date_source 明确标注推断来源）；
+#   - 金额必须有可信来源（amount_source），否则 VISIBLE_INCOMPLETE（不伪造 0 元）；
+#   - 历史兼容行不计入真实 GMV（analytics 仍走 iter_real_settlements）。
+
+def _has_column(db, table, col):
+    cols = [r['name'] for r in db.execute('PRAGMA table_info(%s)' % table).fetchall()]
+    return col in cols
+
+
+def _to_num(v):
+    if v is None or v == '':
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _history_date(p, s):
+    """历史兼容日期 fallback（仅用于历史可见性归档，非真实支付日）。
+
+    优先级：sp.business_date → date(sp.paid_at) → date(sp.end_time)
+            → date(session.end_time) → date(session.start_time)。
+    玩家级 end_time 优先于桌级（旧系统可能存在单人提前结账）。
+    返回 (date_str, date_source)。
+    """
+    p = p or {}
+    s = s or {}
+    for key, src in [
+        ('business_date', 'BUSINESS_DATE'),
+        ('paid_at', 'PAID_AT'),
+        ('end_time', 'PLAYER_END_TIME'),
+    ]:
+        v = p.get(key)
+        if v:
+            return str(v)[:10], src
+    for key, src in [
+        ('end_time', 'SESSION_END_TIME'),
+        ('start_time', 'LEGACY_DATE'),
+    ]:
+        v = s.get(key)
+        if v:
+            return str(v)[:10], src
+    return None, 'NONE'
+
+
+def _norm_history_row(**kw):
+    """构造 normalized 历史兼容结算行（公共字段默认值）。"""
+    base = {
+        'kind': 'player', 'sp_id': None, 'session_id': None, 'machine_id': None,
+        'player_id': None, 'player_name': '', 'start_time': None, 'end_time': None,
+        'duration_minutes': None, 'fee': None, 'final_fee': None, 'product_total': 0,
+        'discount_amount': 0, 'grand_total': None, 'payment_method': None,
+        'paid_at': None, 'is_voided': 0, 'operator': None, 'is_overnight': 0,
+        'machine_name': None, 'machine_type': None, 'void_reason': None,
+        'voided_by': None, 'voided_at': None,
+        # V1.6.1 normalized 字段
+        'source_type': None, 'historical_compat': 1, 'legacy': 0,
+        'visibility_state': None, 'date_source': None, 'amount_source': None,
+        'real_business_date': None, 'display_time': None, 'amount': None,
+    }
+    base.update(kw)
+    return base
+
+
+def _settlement_history_rows(db):
+    """NATIVE_PRE_V16 + LEGACY_IMPORT 历史兼容结算行（normalized）。
+
+    A) NATIVE_PRE_V16：V1.6 之前的原生 QCOS 已结账记录
+       （session_players.status='checked_out' 且无 business_date，且非 Excel
+       legacy 导入）。逐玩家归一化：
+         - 金额：sp.grand_total（EXACT）→ sp.final_fee+product_total（PARTIAL）
+           → 该桌所有玩家均无个人金额但 session.final_fee 可信时出桌级一行
+           （SESSION_FINAL_FEE，PARTIAL，玩家级显示历史未拆分）
+           → 完全无可信金额：VISIBLE_INCOMPLETE（amount=None，不伪造 0 元）。
+         - 日期：_history_date fallback（date_source 标注）。
+         - paid_at 一律 None（不伪造）；display_time=归档时间（end_time）。
+    B) LEGACY_IMPORT：Excel 历史导入（source_id 非空 或 time_precision='date_only'），
+       兼容 status='completed' 与 'closed'，逐桌一行，金额 = session.final_fee。
+    """
+    out = []
+    sp_has_bd = _has_column(db, 'session_players', 'business_date')
+    sp_has_void = _has_column(db, 'session_players', 'is_voided')
+    sp_has_operator = _has_column(db, 'session_players', 'operator')
+    s_has_void = _has_column(db, 'sessions', 'is_voided')
+    s_has_tp = _has_column(db, 'sessions', 'time_precision')
+
+    # ---------- A) NATIVE_PRE_V16 ----------
+    bd_cond = ' AND sp.business_date IS NULL' if sp_has_bd else ''
+    void_sp = ' AND sp.is_voided = 0' if sp_has_void else ''
+    void_s = ' AND s.is_voided = 0' if s_has_void else ''
+    rows = db.execute('''
+        SELECT sp.id AS sp_id, sp.session_id, sp.player_id, sp.player_name,
+               sp.start_time, sp.end_time, sp.duration_minutes,
+               sp.fee, sp.final_fee, sp.product_total, sp.discount_amount,
+               sp.grand_total, sp.payment_method, sp.operator AS sp_operator,
+               s.machine_id, s.start_time AS s_start, s.end_time AS s_end,
+               s.final_fee AS s_final_fee, s.payment_method AS s_pm,
+               s.is_overnight, s.operator AS s_operator,
+               m.name AS machine_name, m.type AS machine_type
+        FROM session_players sp
+        JOIN sessions s ON sp.session_id = s.id
+        LEFT JOIN machines m ON s.machine_id = m.id
+        WHERE sp.status = 'checked_out'
+          AND s.status IN ('closed', 'completed')
+          AND (s.source_id IS NULL OR s.source_id = '')
+          {bd_cond} {void_sp} {void_s}
+        ORDER BY sp.id
+    '''.format(bd_cond=bd_cond, void_sp=void_sp, void_s=void_s)).fetchall()
+
+    by_session = OrderedDict()
+    for r in rows:
+        r = dict(r)
+        by_session.setdefault(r['session_id'], []).append(r)
+
+    for sid, players in by_session.items():
+        s = players[0]
+        no_personal = all(
+            (_to_num(p.get('grand_total')) is None)
+            and (_to_num(p.get('final_fee')) in (None, 0))
+            and (_to_num(p.get('product_total')) in (None, 0))
+            for p in players
+        )
+        s_final = _to_num(s.get('s_final_fee'))
+        if no_personal and s_final is not None and s_final > 0:
+            # 整桌收款：桌级一行（金额不拆到个人，避免平均分摊伪造）
+            names = '、'.join(p['player_name'] for p in players if p['player_name'])
+            date_val, date_src = _history_date(None, s)
+            out.append(_norm_history_row(
+                kind='session', sp_id=None, session_id=sid, player_name=names,
+                machine_id=s.get('machine_id'), machine_name=s.get('machine_name'),
+                machine_type=s.get('machine_type'), is_overnight=s.get('is_overnight'),
+                start_time=s.get('s_start'), end_time=s.get('s_end'),
+                duration_minutes=s.get('duration_minutes'),
+                fee=s_final, final_fee=s_final, product_total=0,
+                discount_amount=_to_num(s.get('discount_amount')) or 0,
+                grand_total=s_final, amount=s_final,
+                amount_source='SESSION_FINAL_FEE', visibility_state='VISIBLE_PARTIAL',
+                payment_method=s.get('s_pm'), operator=s.get('s_operator') or '历史未记录',
+                business_date=date_val, date_source=date_src,
+                display_time=s.get('s_end'), is_voided=0,
+                source_type='NATIVE_PRE_V16',
+            ))
+            continue
+        for p in players:
+            grand = _to_num(p.get('grand_total'))
+            fin = _to_num(p.get('final_fee'))
+            prod = _to_num(p.get('product_total'))
+            if grand is not None:
+                amount, a_src, vis = grand, 'SP_GRAND_TOTAL', 'VISIBLE_EXACT'
+            elif (fin is not None and fin > 0) or (prod is not None and prod > 0):
+                amount = round(float(fin or 0) + float(prod or 0), 2)
+                a_src, vis = 'SP_FINAL_FEE', 'VISIBLE_PARTIAL'
+            else:
+                amount, a_src, vis = None, 'NONE', 'VISIBLE_INCOMPLETE'
+            date_val, date_src = _history_date(p, s)
+            out.append(_norm_history_row(
+                kind='player', sp_id=p['sp_id'], session_id=sid,
+                player_id=p.get('player_id'), player_name=p.get('player_name') or '',
+                machine_id=s.get('machine_id'), machine_name=s.get('machine_name'),
+                machine_type=s.get('machine_type'), is_overnight=s.get('is_overnight'),
+                start_time=p.get('start_time'), end_time=p.get('end_time'),
+                duration_minutes=p.get('duration_minutes'),
+                fee=p.get('fee'), final_fee=p.get('final_fee'),
+                product_total=prod or 0, discount_amount=p.get('discount_amount') or 0,
+                grand_total=amount, amount=amount,
+                amount_source=a_src, visibility_state=vis,
+                payment_method=p.get('payment_method') or s.get('s_pm'),
+                operator=(p.get('sp_operator') if sp_has_operator else None) or s.get('s_operator') or '历史未记录',
+                business_date=date_val, date_source=date_src,
+                display_time=p.get('end_time') or s.get('s_end'),
+                is_voided=0, source_type='NATIVE_PRE_V16',
+            ))
+
+    # ---------- B) LEGACY_IMPORT ----------
+    tp_cond = " OR s.time_precision = 'date_only'" if s_has_tp else ''
+    void_l = ' AND s.is_voided = 0' if s_has_void else ''
+    leg = db.execute('''
+        SELECT s.*, m.name AS machine_name, m.type AS machine_type
+        FROM sessions s
+        LEFT JOIN machines m ON s.machine_id = m.id
+        WHERE s.status IN ('closed', 'completed')
+          AND (s.source_id IS NOT NULL OR s.source_id != ''{tp})
+          {void_l}
+        ORDER BY s.id
+    '''.format(tp=tp_cond, void_l=void_l)).fetchall()
+    for r in leg:
+        r = dict(r)
+        st = r.get('start_time') or ''
+        bd = st[:10] if len(st) >= 10 else None
+        fin = _to_num(r.get('final_fee'))
+        out.append(_norm_history_row(
+            kind='legacy', sp_id=None, session_id=r['id'], player_name='',
+            machine_id=r.get('machine_id'), machine_name=r.get('machine_name'),
+            machine_type=r.get('machine_type'), is_overnight=r.get('is_overnight'),
+            start_time=r.get('start_time'), end_time=r.get('end_time'),
+            duration_minutes=r.get('duration_minutes'),
+            fee=r.get('fee'), final_fee=r.get('final_fee'), product_total=0,
+            discount_amount=_to_num(r.get('discount_amount')) or 0,
+            grand_total=fin, amount=fin,
+            amount_source='LEGACY_IMPORT' if fin is not None else 'NONE',
+            visibility_state='VISIBLE_PARTIAL' if fin is not None else 'VISIBLE_INCOMPLETE',
+            payment_method=None, operator='历史导入',
+            business_date=bd, date_source='LEGACY_DATE',
+            display_time=r.get('end_time'),
+            is_voided=r.get('is_voided') or 0,
+            void_reason=r.get('void_reason'), voided_by=r.get('voided_by'),
+            voided_at=r.get('voided_at'),
+            legacy=1, source_type='LEGACY_IMPORT',
+        ))
+    return out
+
+
+def iter_settlement_rows(db, include_voided=False):
+    """统一收银流水视图（normalized，含历史兼容）：
+
+      - NATIVE_V16：iter_real_settlements 全部行（真实 GMV 口径，business_date 严格）
+      - NATIVE_PRE_V16：V1.6 之前原生结账（无 business_date）→ 历史兼容
+      - LEGACY_IMPORT：Excel 历史导入（completed/closed 均兼容）→ 历史兼容
+
+    每行统一带 source_type / historical_compat / visibility_state /
+    date_source / amount_source / real_business_date / display_time / amount，
+    页面层不再各自写兼容判断。
+
+    注意：历史兼容行不计入真实 GMV——分析中心 / 月度报表仍走
+    iter_real_settlements（business_date 硬过滤），保证「历史可见」与
+    「真实实收 GMV」严格分离。
+    """
+    rows = [dict(r) for r in iter_real_settlements(db, business_date=None, include_voided=include_voided)]
+    for r in rows:
+        r['source_type'] = 'NATIVE_V16'
+        r['historical_compat'] = 0
+        r['legacy'] = 0
+        r['visibility_state'] = 'VISIBLE_EXACT'
+        r['date_source'] = 'BUSINESS_DATE' if r.get('business_date') else ('PAID_AT' if r.get('paid_at') else 'NONE')
+        r['amount_source'] = (
+            'SP_GRAND_TOTAL' if r['kind'] == 'player'
+            else 'SESSION_FINAL_FEE' if r['kind'] == 'session' else 'PAYMENT')
+        r['real_business_date'] = r.get('business_date')
+        r['display_time'] = r.get('paid_at') or r.get('end_time') or ''
+        r['amount'] = r.get('grand_total')
+        r.setdefault('payment_label', '')
+    rows.extend(_settlement_history_rows(db))
+    return rows
+
+
 def real_gmv(db, business_date, include_voided=False):
     """某营业日真实实收 GMV（= 该日所有结算 grand_total 之和，穿透一致）。"""
     rows = iter_real_settlements(db, business_date, include_voided=include_voided)
@@ -221,10 +474,28 @@ def real_gmv_range(db, start, end, include_voided=False):
 def in_progress_estimate(db, now=None):
     """当前进行中桌的「预计」应收（不含任何已结账真实 GMV）。
 
-    仅 active 且未结账的桌；台费按 effective_end_time(now) 估算，商品含未结算挂账。
+    口径：当前所有 active 桌中，所有**尚未结账（status='playing'）**玩家截至当前的
+        「预计台费 + 未结商品消费」的合计（玩家级汇总），另加桌级柜台未结算商品。
+      - 预计台费：复用正式计费引擎 billing.calculate_fee，且与单人结账 preview 完全一致：
+          玩家自己的 start_time + 整桌 effective_end_time + 整桌 is_overnight + 库内 settings。
+      - 未结商品：session_player_id 归属该玩家且 status='UNSETTLED'（已 SETTLED 不计）。
+      - 桌级柜台商品：session_player_id IS NULL 且 status='UNSETTLED'（防重复，不按整桌 SUM）。
+    已单人结账（checked_out）玩家不再计入；已结算商品不再计入。
     这是「预计」不是「真实」，UI 必须明确区分。
     """
     now = now or shanghai_now()
+    # 与台桌总览 / 单人结账 preview 同源的库内设置（而非硬编码默认值）
+    settings = {}
+    for row in db.execute('SELECT key, value FROM settings').fetchall():
+        val = row['value']
+        try:
+            settings[row['key']] = int(val)
+        except (ValueError, TypeError):
+            try:
+                settings[row['key']] = float(val)
+            except (ValueError, TypeError):
+                settings[row['key']] = val
+
     rows = db.execute(
         "SELECT * FROM sessions WHERE status='active'"
     ).fetchall()
@@ -233,26 +504,39 @@ def in_progress_estimate(db, now=None):
         r = dict(r)
         # 延迟 import 避免循环依赖
         import billing
-        from config import DEFAULT_SETTINGS
-        settings = DEFAULT_SETTINGS
-        start = _as_dt(r['start_time'])
-        if start is None:
-            continue
-        # 复用 overnight 的 effective_end_time（若存在），否则用 now
-        try:
-            import overnight
-            end = overnight.effective_end_time(r, now=now)
-        except Exception:
-            end = now
-        is_overnight = bool(r.get('is_overnight'))
-        fee, _ = billing.calculate_fee(
-            _machine_type(db, r['machine_id']), start, end, settings, is_overnight=is_overnight
-        )
-        prod = db.execute(
-            "SELECT COALESCE(SUM(total), 0) t FROM product_sales WHERE session_id=? AND status='UNSETTLED'",
+        import overnight
+        # 与单人结账 preview 相同：整桌 effective_end_time + 整桌 is_overnight
+        end = overnight.effective_end_time(r, now=now)
+        effective_is_overnight = bool(r.get('is_overnight'))
+        machine_type = _machine_type(db, r['machine_id'])
+
+        # 1) 未结账（playing）玩家逐人累计：预计台费 + 未结商品
+        players = db.execute(
+            "SELECT * FROM session_players WHERE session_id=? AND status='playing'",
+            [r['id']]
+        ).fetchall()
+        for p in players:
+            p = dict(p)
+            start = _as_dt(p.get('start_time'))
+            if start is None:
+                continue
+            fee, _ = billing.calculate_fee(
+                machine_type, start, end, settings, is_overnight=effective_is_overnight
+            )
+            prod = db.execute(
+                "SELECT COALESCE(SUM(total), 0) t FROM product_sales "
+                "WHERE session_player_id=? AND status='UNSETTLED'",
+                [p['id']]
+            ).fetchone()['t'] or 0
+            total += round(float(fee or 0) + float(prod or 0), 2)
+
+        # 2) 桌级柜台未结算商品（挂桌不挂玩家；按 session_player_id IS NULL 防重复）
+        counter = db.execute(
+            "SELECT COALESCE(SUM(total), 0) t FROM product_sales "
+            "WHERE session_id=? AND session_player_id IS NULL AND status='UNSETTLED'",
             [r['id']]
         ).fetchone()['t'] or 0
-        total += round(float(fee or 0) + float(prod or 0), 2)
+        total += round(float(counter or 0), 2)
     return round(total, 2)
 
 
