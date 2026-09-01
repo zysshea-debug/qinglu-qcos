@@ -303,6 +303,27 @@ def calculate_discount(fee, discount_type, max_deduction):
     return 0
 
 
+def calculate_reward(fee, reward_type):
+    """计算活动奖励金金额（主动约桌抽奖，当场按当次台费计算）。
+
+    Args:
+        fee: 当次原始台费（含手动/抽奖折扣前的台费）
+        reward_type: 'free' 免台费 / 'half' 半价 / 'discount' 8折
+    Returns:
+        发放的奖励金额（封顶：free 100 / half 50 / discount 30）
+    """
+    fee = float(fee or 0)
+    if fee <= 0:
+        return 0.0
+    if reward_type == 'free':
+        return round(min(fee, 100.0), 2)
+    elif reward_type == 'half':
+        return round(min(fee * 0.5, 50.0), 2)
+    elif reward_type == 'discount':
+        return round(min(fee * 0.2, 30.0), 2)
+    return 0.0
+
+
 def calculate_manual_discount(fee, discount_type, value):
     """计算手动台费折扣金额
 

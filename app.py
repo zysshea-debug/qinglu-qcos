@@ -9,11 +9,12 @@ import io
 import sqlite3
 import re
 import os
+import uuid
 
 from models import get_db, init_db, get_all_settings, update_setting, hash_password
-from billing import calculate_fee, calculate_discount, calculate_manual_discount, get_current_fee, get_billing_explanation
+from billing import calculate_fee, calculate_discount, calculate_manual_discount, calculate_reward, get_current_fee, get_billing_explanation
 import overnight
-from config import (MACHINE_TYPE_LABELS, MACHINE_MAX_PLAYERS, LOTTERY_TYPES,
+from config import (MACHINE_TYPE_LABELS, MACHINE_MAX_PLAYERS, LOTTERY_TYPES, REWARD_TYPES,
                     PAYMENT_METHODS, PAGE_PERMISSIONS, ROLES, PRODUCT_CATEGORIES,
                     STAFF_TYPES, STAFF_STATUS, SETTLEMENT_STATUS, SECRET_KEY,
                     CI_TIME_SLOTS, CI_PLAYER_TYPES, CI_ACTIVITY_LEVELS, CI_SPENDING_LEVELS,
@@ -29,6 +30,29 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # 禁用静态文件缓存
 app.secret_key = SECRET_KEY
 
 init_db()
+
+
+# ===== 结账金额快照（数据库持久化）=====
+# 冻结金额写入 checkout_snapshots 表，不依赖进程内存；服务重启后仍可从数据库读取。
+# 商品指纹：按 product_id/名称、数量、单价、金额 排序后哈希，金额相同但内容变化也能检测。
+
+def compute_product_fingerprint(product_sales):
+    """生成商品内容指纹：金额相同但商品内容变化也能检测（如 A¥20 换成 B¥20）。"""
+    items = []
+    for ps in product_sales:
+        ps = dict(ps)
+        pid = ps.get('product_id')
+        key = ps.get('product_name') if pid is None else f'p{pid}'
+        items.append((
+            key,
+            int(ps.get('quantity', 1) or 1),
+            round(float(ps.get('price', 0) or 0), 2),
+            round(float(ps.get('total', 0) or 0), 2),
+        ))
+    items.sort()
+    import hashlib
+    raw = json.dumps(items, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 # ===== 权限系统 =====
@@ -881,6 +905,71 @@ def api_player_preview(session_id, sp_id):
             sp['is_member'] = 1
             sp['member_id'] = m['id']
 
+    # 优惠券（与 checkout 同口径：仅在传入 discount_id 时应用）
+    discount_type = None
+    discount_id = None
+    discount_amount = 0
+    if data.get('discount_id'):
+        discount = db.execute('SELECT * FROM discounts WHERE id=?', [data['discount_id']]).fetchone()
+        if discount and not discount['used']:
+            discount_type = discount['discount_type']
+            discount_id = discount['id']
+            discount_amount = calculate_discount(sp['fee_after_manual'], discount_type, discount['max_deduction'])
+
+    final_fee = max(round(sp['fee_after_manual'] - discount_amount, 2), 0)
+
+    # 活动奖励金：仅抵扣台费部分，且按 preview 当下余额锁定，避免结账时重新计算漂移
+    reward_balance_before = None
+    reward_deduct = 0.0
+    if sp.get('member_info') and (sp['member_info'].get('reward_balance') or 0) > 0 and final_fee > 0:
+        reward_balance_before = round(float(sp['member_info']['reward_balance']), 2)
+        reward_deduct = round(min(reward_balance_before, float(final_fee)), 2)
+
+    grand_total = round(final_fee - reward_deduct + sp['product_total'], 2)
+
+    # ===== 冻结本次结账金额快照（写入数据库，不依赖进程内存）=====
+    token = uuid.uuid4().hex
+    now_iso = datetime.now().isoformat()
+    product_fingerprint = compute_product_fingerprint(product_sales)
+    operator = (g.user or {}).get('name', '')
+
+    # 取消同一 session_player 的旧 ACTIVE 快照（一个玩家同时只允许一个有效快照）
+    db.execute(
+        "UPDATE checkout_snapshots SET status='CANCELLED', cancelled_at=? "
+        "WHERE session_player_id=? AND status='ACTIVE'",
+        [now_iso, sp_id]
+    )
+    db.execute(
+        '''INSERT INTO checkout_snapshots
+           (token, session_id, session_player_id, member_id, start_time, is_overnight,
+            fee, fee_breakdown,
+            manual_discount_type, manual_discount_value, manual_discount_amount,
+            fee_after_manual,
+            discount_type, discount_id, discount_amount, final_fee, product_total,
+            reward_balance_before, reward_deduct, grand_total, status, created_at,
+            product_fingerprint, operator)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   'ACTIVE', ?, ?, ?)''',
+        [token, session_id, sp_id, sp.get('member_id'), sp['start_time'],
+         sp['is_overnight'],
+         sp['fee'], json.dumps(sp['fee_breakdown'], ensure_ascii=False),
+         sp['manual_discount_type'], sp['manual_discount_value'], sp['manual_discount_amount'],
+         sp['fee_after_manual'],
+         discount_type, discount_id, discount_amount, final_fee, sp['product_total'],
+         reward_balance_before, reward_deduct, grand_total, now_iso,
+         product_fingerprint, operator]
+    )
+    db.commit()
+
+    sp['final_fee'] = final_fee
+    sp['reward_deduct'] = reward_deduct
+    sp['grand_total'] = grand_total
+    sp['discount_amount'] = discount_amount
+    sp['discount_type'] = discount_type
+    sp['discount_id'] = discount_id
+    sp['checkout_token'] = token
+
     return jsonify(sp)
 
 
@@ -1036,6 +1125,34 @@ def api_player_checkout(session_id, sp_id):
     if sp['status'] != 'playing':
         return jsonify({'error': '该玩家已结账'}), 400
 
+    # ===== 结账金额快照（数据库持久化，防 preview→checkout 时间漂移重新涨价）=====
+    checkout_token = (data or {}).get('checkout_token')
+    snap = None
+    use_snapshot = False
+    snap_reward_member = None
+    if checkout_token:
+        snap = db.execute('SELECT * FROM checkout_snapshots WHERE token=?', [checkout_token]).fetchone()
+        if not snap:
+            return jsonify({'error': '结账快照不存在，请重新预览'}), 400
+        if snap['status'] == 'USED':
+            # 已被结账或并发请求抢先认领 -> 拒绝重复结账（防双击重复扣款）
+            return jsonify({'error': 'SNAPSHOT_ALREADY_USED', 'code': 'SNAPSHOT_ALREADY_USED'}), 409
+        if snap['status'] != 'ACTIVE':
+            return jsonify({'error': '结账快照已失效，请重新预览结账'}), 400
+        if snap['session_player_id'] != sp_id or snap['session_id'] != session_id:
+            return jsonify({'error': '结账快照与会话不匹配，请重新预览'}), 400
+        # 商品指纹校验：金额相同但内容变化也检测（如 A¥20 换成 B¥20）
+        actual_ps = db.execute('SELECT * FROM product_sales WHERE session_player_id=?', [sp_id]).fetchall()
+        if compute_product_fingerprint(actual_ps) != (snap['product_fingerprint'] or ''):
+            return jsonify({'error': '商品已变更，请重新预览结账'}), 400
+        # 奖励金余额校验：快照锁定的 reward_deduct 必须仍可被余额覆盖
+        if (snap['reward_deduct'] or 0) > 0 and snap['member_id']:
+            rm = db.execute("SELECT * FROM members WHERE id=? AND status='active'", [snap['member_id']]).fetchone()
+            if not rm or (rm['reward_balance'] or 0) < snap['reward_deduct']:
+                return jsonify({'error': '奖励金余额已变化，请重新预览结账'}), 400
+            snap_reward_member = rm
+        use_snapshot = True
+
     sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
     if sess is not None:
         sess = dict(sess)
@@ -1098,7 +1215,94 @@ def api_player_checkout(session_id, sp_id):
     product_total = data.get('product_total', 0)
     payment_method = data.get('payment_method')
     member_id = data.get('member_id')
-    grand_total = round(final_fee + product_total, 2)
+
+    # 默认无快照时的奖励金抵扣初值
+    reward_deduct = 0.0
+    reward_balance_before = None
+    reward_balance_after = None
+
+    # ===== 若携带有效快照，用冻结金额覆盖实时重算结果（必须在奖励金核销前完成）=====
+    if use_snapshot:
+        start_time = datetime.fromisoformat(snap['start_time'])
+        is_overnight = bool(snap['is_overnight'])
+        fee = snap['fee']
+        breakdown = json.loads(snap['fee_breakdown']) if snap['fee_breakdown'] else []
+        manual_discount_type = snap['manual_discount_type']
+        manual_discount_value = snap['manual_discount_value']
+        manual_discount_amount = snap['manual_discount_amount']
+        fee_after_manual = snap['fee_after_manual']
+        discount_type = snap['discount_type']
+        discount_id = snap['discount_id']
+        discount_amount = snap['discount_amount']
+        final_fee = snap['final_fee']
+        product_total = snap['product_total']
+        reward_deduct = snap['reward_deduct']
+        reward_balance_before = snap['reward_balance_before']
+
+        # ===== 原子认领快照：在本事务内把 ACTIVE 翻为 USED（防双击/并发重复扣款）=====
+        # 必须在奖励金核销与会员扣款之前完成；rowcount=0 表示被并发请求抢先，整体回滚拒绝。
+        claim_cur = db.execute(
+            "UPDATE checkout_snapshots SET status='USED', used_at=? WHERE token=? AND status='ACTIVE'",
+            [datetime.now().isoformat(), checkout_token]
+        )
+        if claim_cur.rowcount == 0:
+            db.rollback()
+            return jsonify({'error': 'SNAPSHOT_ALREADY_USED', 'code': 'SNAPSHOT_ALREADY_USED'}), 409
+
+    # ===== 活动奖励金优先抵扣台费（仅限台费部分，商品不可抵扣）=====
+    # 扣款顺序：先用活动奖励金(reward_balance)抵扣台费，不足部分再走会员储值/现金/扫码等原支付逻辑
+    if use_snapshot and reward_deduct > 0 and snap_reward_member:
+        # 使用冻结快照锁定的奖励金抵扣额（入口已校验余额充足，防止超额/重复核销）
+        cur = round(float(snap_reward_member['reward_balance']), 2)
+        reward_balance_after = round(cur - reward_deduct, 2)
+        db.execute(
+            'UPDATE members SET reward_balance=?, updated_at=? WHERE id=?',
+            [reward_balance_after, datetime.now().isoformat(), snap_reward_member['id']]
+        )
+        db.execute(
+            '''INSERT INTO reward_redemptions
+               (member_id, amount, session_id, session_player_id, table_fee,
+                balance_before, balance_after, operator, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            [snap_reward_member['id'], reward_deduct, session_id, sp_id, final_fee,
+             cur, reward_balance_after, g.user['name'], datetime.now().isoformat()]
+        )
+    elif not use_snapshot and final_fee > 0:
+        # 非快照路径：按当前会员余额现场抵扣（保持向后兼容）
+        lookup_member_id = member_id
+        if not lookup_member_id:
+            sp_pid = sp['player_id'] if 'player_id' in sp.keys() else None
+            if sp_pid:
+                m = db.execute(
+                    "SELECT id FROM members WHERE player_id=? AND status='active'", [sp_pid]
+                ).fetchone()
+                if m:
+                    lookup_member_id = m['id']
+        if lookup_member_id:
+            reward_member = db.execute(
+                "SELECT * FROM members WHERE id=? AND status='active'", [lookup_member_id]
+            ).fetchone()
+            if reward_member and (reward_member['reward_balance'] or 0) > 0:
+                reward_balance_before = round(float(reward_member['reward_balance']), 2)
+                reward_deduct = round(min(reward_balance_before, float(final_fee)), 2)
+                if reward_deduct > 0:
+                    reward_balance_after = round(reward_balance_before - reward_deduct, 2)
+                    db.execute(
+                        'UPDATE members SET reward_balance=?, updated_at=? WHERE id=?',
+                        [reward_balance_after, datetime.now().isoformat(), reward_member['id']]
+                    )
+                    db.execute(
+                        '''INSERT INTO reward_redemptions
+                           (member_id, amount, session_id, session_player_id, table_fee,
+                            balance_before, balance_after, operator, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        [reward_member['id'], reward_deduct, session_id, sp_id, final_fee,
+                         reward_balance_before, reward_balance_after,
+                         g.user['name'], datetime.now().isoformat()]
+                    )
+
+    # 奖励金抵扣后的实际应付（台费部分），商品仍全额计入
+    grand_total = round(final_fee - reward_deduct + product_total, 2)
 
     # 支付确认门禁：扫码收款且已配置支付通道时，必须确认到账才能结账
     provider = payment_module.get_provider()
@@ -1142,14 +1346,14 @@ def api_player_checkout(session_id, sp_id):
         '''UPDATE session_players SET start_time=?, is_overnight=?, end_time=?, duration_minutes=?, fee=?, fee_breakdown=?,
            manual_discount_type=?, manual_discount_value=?, manual_discount_amount=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
-           product_total=?, grand_total=?, payment_method=?, status="checked_out",
+           product_total=?, grand_total=?, reward_deduct=?, payment_method=?, status="checked_out",
            business_date=?, paid_at=?, operator=? WHERE id=?''',
         [start_time.isoformat(), 1 if effective_is_overnight else 0, end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          manual_discount_type, manual_discount_value, manual_discount_amount,
          discount_type, discount_id, discount_amount, final_fee,
-         product_total, grand_total, payment_method,
-         sp_biz_dt, sp_paid_at, g.user['name'], sp_id]
+             product_total, grand_total, reward_deduct, payment_method,
+             sp_biz_dt, sp_paid_at, g.user['name'], sp_id]
     )
 
     # 标记优惠券已用
@@ -1186,10 +1390,265 @@ def api_player_checkout(session_id, sp_id):
         'final_fee': final_fee,
         'product_total': product_total,
         'grand_total': grand_total,
+        'reward_deduct': reward_deduct,
+        'reward_balance_after': reward_balance_after,
         'payment_method': payment_method,
         'session_closed': remaining == 0,
         'member_balance_after': db.execute('SELECT balance FROM members WHERE id=?', [member_id]).fetchone()['balance'] if (payment_method == 'member' and member_id) else None
     })
+
+
+# ===== API: 活动奖励金（独立账户 reward_balance）=====
+
+@app.route('/api/rewards/context')
+@role_required('lottery')
+def api_reward_context():
+    """搜索玩家→会员→进行中桌局的实时台费，供发放奖励金前预览"""
+    db = g.db
+    name = request.args.get('name', '').strip()
+    if not name:
+        return jsonify([])
+
+    rows = db.execute(
+        '''SELECT m.id as member_id, p.id as player_id, p.name as player_name, p.phone,
+                  m.balance, m.reward_balance, m.status
+           FROM players p JOIN members m ON m.player_id = p.id
+           WHERE p.name LIKE ? AND m.status = 'active' LIMIT 10''',
+        [f'%{name}%']
+    ).fetchall()
+    if not rows:
+        return jsonify([])
+
+    settings = get_all_settings(db)
+    result = []
+    for r in rows:
+        r = dict(r)
+        r['active_table'] = None
+        sp = db.execute(
+            '''SELECT sp.*, s.machine_id, m.name as machine_name, m.type as machine_type
+               FROM session_players sp
+               JOIN sessions s ON sp.session_id = s.id
+               JOIN machines m ON s.machine_id = m.id
+               WHERE sp.player_id = ? AND sp.status = 'playing' AND s.status = 'active'
+               ORDER BY sp.id LIMIT 1''',
+            [r['player_id']]
+        ).fetchone()
+        if sp:
+            sp = dict(sp)
+            try:
+                start_time = datetime.fromisoformat(sp['start_time']) if sp.get('start_time') else datetime.now()
+            except (ValueError, TypeError):
+                start_time = datetime.now()
+            is_overnight = bool(sp.get('is_overnight', 0))
+            fee, _ = calculate_fee(sp['machine_type'], start_time, datetime.now(), settings, is_overnight=is_overnight)
+            r['active_table'] = {
+                'session_id': sp['session_id'],
+                'session_player_id': sp['id'],
+                'machine_name': sp['machine_name'],
+                'machine_type': sp['machine_type'],
+                'start_time': sp['start_time'],
+                'is_overnight': 1 if is_overnight else 0,
+                'current_fee': fee,
+            }
+        result.append(r)
+    return jsonify(result)
+
+
+@app.route('/api/rewards/grant', methods=['POST'])
+@role_required('lottery')
+def api_reward_grant():
+    """当场发放活动奖励金：后端用正式计费引擎计算 server_fee，绝不信前端 fee。
+
+    - 校验 session 存在/active、player 确属该 session、player 仍 playing、会员与 player 合法对应（防伪造关联桌）。
+    - 同一次抽奖（draw_id）幂等：重复请求返回原发放结果，不重复增加 reward_balance。
+    - client_fee 仅作一致性提示；若与 server_fee 偏差过大返回 FEE_STALE，但绝不据其发奖。
+    """
+    data = request.json or {}
+    db = g.db
+
+    reward_type = data.get('reward_type')
+    rt = REWARD_TYPES.get(reward_type)
+    if not rt:
+        return jsonify({'error': '无效的奖励类型'}), 400
+
+    member_id = data.get('member_id')
+    draw_id = data.get('draw_id') or data.get('idempotency_key')
+
+    # 幂等：同一 draw_id 重复发放，返回原结果，不重复加余额
+    if draw_id:
+        existing = db.execute('SELECT * FROM reward_grants WHERE draw_id=?', [draw_id]).fetchone()
+        if existing:
+            e = dict(existing)
+            return jsonify({
+                'status': 'ok', 'idempotent': True,
+                'grant_id': e['id'], 'reward_type': e['reward_type'],
+                'reward_amount': e['reward_amount'], 'balance_before': e['balance_before'],
+                'balance_after': e['balance_after'], 'server_fee': e['original_fee'],
+            }), 200
+
+    session_id = data.get('session_id')
+    session_player_id = data.get('session_player_id')
+    client_fee = data.get('fee')  # 仅作一致性提示，绝不作为发奖依据
+
+    # 定位真实进行中玩家（必须提供 session/player，禁止伪造关联任意会员）
+    sp = None
+    if session_id and session_player_id:
+        sp = db.execute(
+            '''SELECT sp.*, s.status AS sess_status, s.machine_id, m.type AS machine_type
+               FROM session_players sp
+               JOIN sessions s ON sp.session_id = s.id
+               JOIN machines m ON s.machine_id = m.id
+               WHERE sp.id=? AND s.id=?''',
+            [session_player_id, session_id]
+        ).fetchone()
+        if not sp or sp['status'] != 'playing' or sp['sess_status'] != 'active':
+            return jsonify({'error': 'INVALID_GRANT_TARGET', 'code': 'INVALID_GRANT_TARGET'}), 400
+    else:
+        # 兼容：未传 session 时按会员进行中桌局定位（server_fee 仍后端计算，无法伪造）
+        if member_id:
+            sp = db.execute(
+                '''SELECT sp.*, s.status AS sess_status, s.machine_id, m.type AS machine_type
+                   FROM session_players sp
+                   JOIN sessions s ON sp.session_id = s.id
+                   JOIN machines m ON s.machine_id = m.id
+                   JOIN players p ON sp.player_id = p.id
+                   JOIN members mem ON mem.player_id = p.id
+                   WHERE mem.id=? AND sp.status='playing' AND s.status='active'
+                   ORDER BY sp.id LIMIT 1''',
+                [member_id]
+            ).fetchone()
+
+    # 解析会员（优先 member_id；否则由真实 session_player 反查）
+    member = None
+    if member_id:
+        member = db.execute("SELECT * FROM members WHERE id=? AND status='active'", [member_id]).fetchone()
+    if not member and sp:
+        member = db.execute(
+            "SELECT * FROM members WHERE player_id=? AND status='active'", [sp['player_id']]
+        ).fetchone()
+    if not member:
+        return jsonify({'error': '会员不存在或已停用'}), 404
+    member_id = member['id']
+
+    # 防伪：若同时提供 session_player 与 member，二者必须一致
+    if sp and sp['player_id']:
+        m2 = db.execute("SELECT * FROM members WHERE player_id=? AND status='active'", [sp['player_id']]).fetchone()
+        if m2 and m2['id'] != member_id:
+            return jsonify({'error': 'INVALID_GRANT_TARGET', 'code': 'INVALID_GRANT_TARGET'}), 400
+
+    # 后端权威计算 server_fee（绝不使用 client_fee）
+    if sp:
+        settings = get_all_settings(db)
+        sp_keys = sp.keys()
+        st = sp['start_time'] if ('start_time' in sp_keys and sp['start_time']) \
+            else (datetime.now() - timedelta(hours=1)).isoformat()
+        try:
+            start_time = datetime.fromisoformat(st)
+        except (ValueError, TypeError):
+            start_time = datetime.now() - timedelta(hours=1)
+        server_fee, _ = calculate_fee(
+            sp['machine_type'], start_time, datetime.now(), settings,
+            is_overnight=bool(sp['is_overnight'] if 'is_overnight' in sp_keys else 0)
+        )
+        server_fee = round(server_fee, 2)
+    else:
+        # 无真实进行中桌局：无法计算台费，拒绝凭空发奖
+        return jsonify({'error': 'INVALID_GRANT_TARGET', 'code': 'INVALID_GRANT_TARGET'}), 400
+
+    # 一致性提示：client_fee 与 server_fee 偏差过大 -> 要求刷新（但绝不据 client_fee 发奖）
+    if client_fee is not None:
+        try:
+            cf = round(float(client_fee), 2)
+            if abs(cf - server_fee) > 1.0:
+                return jsonify({
+                    'error': 'FEE_STALE', 'code': 'FEE_STALE',
+                    'server_fee': server_fee, 'client_fee': cf
+                }), 409
+        except (TypeError, ValueError):
+            pass
+
+    if server_fee <= 0:
+        return jsonify({'error': '台费必须大于0'}), 400
+
+    amount = calculate_reward(server_fee, reward_type)
+    if amount <= 0:
+        return jsonify({'error': '奖励金额为0，无法发放'}), 400
+
+    player = db.execute('SELECT name FROM players WHERE id=?', [member['player_id']]).fetchone()
+    player_name = player['name'] if player else (data.get('player_name') or '')
+
+    balance_before = round(float(member['reward_balance'] or 0), 2)
+    balance_after = round(balance_before + amount, 2)
+    now = datetime.now().isoformat()
+
+    try:
+        db.execute('UPDATE members SET reward_balance=?, updated_at=? WHERE id=?', [balance_after, now, member_id])
+        cursor = db.execute(
+            '''INSERT INTO reward_grants
+               (member_id, player_name, source_activity, reward_type, original_fee, reward_amount,
+                balance_before, balance_after, session_id, session_player_id, operator, created_at, draw_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            [member_id, player_name, 'active_table_lottery', reward_type, server_fee, amount,
+             balance_before, balance_after, session_id, session_player_id,
+             (g.user or {}).get('name', ''), now, draw_id]
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        # 并发幂等：draw_id 唯一冲突 -> 回滚并返回已存在的发放结果
+        db.rollback()
+        existing = db.execute('SELECT * FROM reward_grants WHERE draw_id=?', [draw_id]).fetchone()
+        if existing:
+            e = dict(existing)
+            return jsonify({
+                'status': 'ok', 'idempotent': True,
+                'grant_id': e['id'], 'reward_type': e['reward_type'],
+                'reward_amount': e['reward_amount'], 'balance_before': e['balance_before'],
+                'balance_after': e['balance_after'], 'server_fee': e['original_fee'],
+            }), 200
+        raise
+
+    return jsonify({
+        'status': 'ok',
+        'grant_id': cursor.lastrowid,
+        'reward_type': reward_type,
+        'reward_amount': amount,
+        'balance_before': balance_before,
+        'balance_after': balance_after,
+        'server_fee': server_fee,
+    }), 201
+
+
+@app.route('/api/rewards/grants')
+@role_required('members')
+def api_reward_grants():
+    """发放流水查询"""
+    db = g.db
+    member_id = request.args.get('member_id')
+    if not member_id:
+        return jsonify([])
+    rows = db.execute(
+        'SELECT * FROM reward_grants WHERE member_id=? ORDER BY id DESC', [member_id]
+    ).fetchall()
+    result = []
+    for r in rows:
+        r = dict(r)
+        r['type_label'] = REWARD_TYPES.get(r['reward_type'], {}).get('label', r['reward_type'])
+        result.append(r)
+    return jsonify(result)
+
+
+@app.route('/api/rewards/redemptions')
+@role_required('members')
+def api_reward_redemptions():
+    """核销流水查询"""
+    db = g.db
+    member_id = request.args.get('member_id')
+    if not member_id:
+        return jsonify([])
+    rows = db.execute(
+        'SELECT * FROM reward_redemptions WHERE member_id=? ORDER BY id DESC', [member_id]
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 # ===== API: 商品 =====

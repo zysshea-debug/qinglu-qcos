@@ -66,6 +66,10 @@ import app as APP
 import revenue
 from models import get_db
 
+# 告知 conftest：本模块每测试用模块级 DB 直写、并依赖 API 读同一库，
+# 需要在每测试把 DB 重新绑定到 conftest 的临时库（DB 与 API 同源）。
+_REBIND_DB_PER_TEST = True
+
 client = APP.app.test_client()
 
 # 模块级单一连接：避免每个测试新建连接后残留 SQLite 读事务（SHARED 锁）
@@ -414,13 +418,16 @@ def test_month_filter_includes_legacy_and_pre_v16():
     db = DB
     # pre-v16
     d1 = date.today()
-    sid1 = _insert_session(db, M4, datetime(d1.year, d1.month, 5, 18, 0),
-                           end=datetime(d1.year, d1.month, 5, 21, 0), final_fee=50)
-    _insert_player(db, sid1, '甲', datetime(d1.year, d1.month, 5, 18, 0),
-                   datetime(d1.year, d1.month, 5, 21, 0), grand_total=50)
+    # 用「不晚于今天」的日期，避免今天处于月初时 day=5/6 落在 month 视图（end=today）之外
+    day_a = d1.day
+    day_b = max(1, d1.day - 1)
+    sid1 = _insert_session(db, M4, datetime(d1.year, d1.month, day_a, 18, 0),
+                           end=datetime(d1.year, d1.month, day_a, 21, 0), final_fee=50)
+    _insert_player(db, sid1, '甲', datetime(d1.year, d1.month, day_a, 18, 0),
+                   datetime(d1.year, d1.month, day_a, 21, 0), grand_total=50)
     # legacy completed
-    sid2 = _insert_session(db, M4, datetime(d1.year, d1.month, 6, 18, 0),
-                           end=datetime(d1.year, d1.month, 6, 21, 0), status='completed',
+    sid2 = _insert_session(db, M4, datetime(d1.year, d1.month, day_b, 18, 0),
+                           end=datetime(d1.year, d1.month, day_b, 21, 0), status='completed',
                            final_fee=120, source_id='excel_month_test')
     db.commit()
     r = client.get('/api/cashier_history', query_string={'preset': 'month'})

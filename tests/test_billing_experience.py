@@ -200,4 +200,11 @@ check('通宵说明 total=100', exp_flat.get('total') == 100)
 # ============================================================
 print('\n' + '=' * 40)
 print(f'V1.4 计费体验测试：通过 {_pass} / 失败 {_fail}')
-sys.exit(1 if _fail else 0)
+if __name__ == '__main__':
+    sys.exit(1 if _fail else 0)
+
+
+def test_billing_experience_suite():
+    """pytest 入口：套件在导入期已确定性执行完，此处断言其结果为全通过（真实收集，非隐藏）。"""
+    assert _pass > 0, '计费体验套件未实际执行'
+    assert _fail == 0, f'V1.4 计费体验测试失败 {_fail} 项'

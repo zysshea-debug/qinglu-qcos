@@ -20,6 +20,15 @@ MACHINE_MAX_PLAYERS = {
     '4port': 4,
 }
 
+# ===== 主动约桌抽奖·活动奖励金 =====
+# 与 LOTTERY_TYPES 不同：奖励金进入独立账户(reward_balance)，当场发放，仅可抵扣台费
+# cap 为单次发放封顶金额：free 免台费100 / half 半价50 / discount 8折30
+REWARD_TYPES = {
+    'free': {'label': '免台费', 'cap': 100},
+    'half': {'label': '半价', 'cap': 50},
+    'discount': {'label': '8折', 'cap': 30},
+}
+
 # 默认设置（初始化时写入数据库，之后从UI修改）
 DEFAULT_SETTINGS = {
     'rate_8port': 20,

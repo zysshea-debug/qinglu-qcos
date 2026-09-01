@@ -264,6 +264,13 @@ def test_penetration_consistency():
     CURRENT['now'] = datetime(2026, 8, 23, 7, 0, 0)
     db = get_db()
 
+    # 函数级 DB 隔离下每测试独立库，本测试需自行造数（不再依赖同文件其他测试的共享库）：
+    # 1 个今日已结桌（business_date=8/23）+ 1 个进行中桌（active_sessions=1）
+    sid_closed = start_session(1, '2026-08-23T03:00:00', [{'name': '已结桌', 'start_time': '2026-08-23T03:00:00'}])
+    sp_id = client.get(f'/api/sessions/{sid_closed}/preview').get_json()['players'][0]['id']
+    checkout_player(sid_closed, sp_id)
+    start_session(2, '2026-08-23T05:00:00', [{'name': '进行中桌', 'start_time': '2026-08-23T05:00:00'}])
+
     r = client.get('/api/cashier_history?preset=today')
     assert r.status_code == 200, r.data
     data = r.get_json()['data']

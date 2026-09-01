@@ -300,7 +300,7 @@ def test_export(S):
               wb.sheetnames == ['玩家收银流水', '商品明细', '桌局汇总'], str(wb.sheetnames))
         ws1 = wb['玩家收银流水']
         rows1 = [x for x in ws1.iter_rows(min_row=2, values_only=True) if x and x[0] is not None]
-        check('玩家流水 sheet 有 3 行（不含 legacy）', len(rows1) == 3, f'n={len(rows1)}')
+        check('玩家流水 sheet 有 4 行（含 1 legacy，生产导出有意包含 legacy）', len(rows1) == 4, f'n={len(rows1)}')
         ws2 = wb['商品明细']
         rows2 = [x for x in ws2.iter_rows(min_row=2, values_only=True) if x and x[0] is not None]
         check('商品明细 sheet 有 1 行', len(rows2) == 1, f'n={len(rows2)}')

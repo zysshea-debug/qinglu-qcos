@@ -742,6 +742,84 @@ def init_db():
     if 'source_id' not in s_col_names:
         db.execute('ALTER TABLE sessions ADD COLUMN source_id TEXT')
 
+    # ===== 迁移：活动奖励金 & 结账金额快照（Final Hardening，最小增量）=====
+    # 独立奖励金账户 reward_balance 与真实储值 balance 严格分离
+    if 'reward_balance' not in m_col_names:
+        db.execute('ALTER TABLE members ADD COLUMN reward_balance REAL DEFAULT 0')
+
+    # session_players 加奖励金抵扣额
+    if 'reward_deduct' not in col_names:
+        db.execute('ALTER TABLE session_players ADD COLUMN reward_deduct REAL DEFAULT 0')
+
+    # 三张新表（幂等创建）
+    db.execute('''CREATE TABLE IF NOT EXISTS reward_grants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        member_id INTEGER NOT NULL,
+        player_name TEXT,
+        source_activity TEXT DEFAULT 'active_table_lottery',
+        reward_type TEXT NOT NULL,
+        original_fee REAL NOT NULL,
+        reward_amount REAL NOT NULL,
+        balance_before REAL,
+        balance_after REAL,
+        session_id INTEGER,
+        session_player_id INTEGER,
+        operator TEXT,
+        created_at TEXT,
+        FOREIGN KEY (member_id) REFERENCES members(id)
+    )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS reward_redemptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        member_id INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        session_id INTEGER,
+        session_player_id INTEGER,
+        table_fee REAL,
+        balance_before REAL,
+        balance_after REAL,
+        operator TEXT,
+        created_at TEXT,
+        FOREIGN KEY (member_id) REFERENCES members(id)
+    )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS checkout_snapshots (
+        token TEXT PRIMARY KEY,
+        session_id INTEGER NOT NULL,
+        session_player_id INTEGER NOT NULL,
+        member_id INTEGER,
+        start_time TEXT,
+        is_overnight INTEGER DEFAULT 0,
+        fee REAL,
+        fee_breakdown TEXT,
+        manual_discount_type TEXT,
+        manual_discount_value REAL,
+        manual_discount_amount REAL,
+        fee_after_manual REAL,
+        discount_type TEXT,
+        discount_id INTEGER,
+        discount_amount REAL,
+        final_fee REAL,
+        product_total REAL,
+        reward_balance_before REAL,
+        reward_deduct REAL,
+        grand_total REAL,
+        status TEXT DEFAULT 'ACTIVE',
+        created_at TEXT,
+        used_at TEXT,
+        cancelled_at TEXT,
+        product_fingerprint TEXT,
+        operator TEXT
+    )''')
+
+    # reward_grants 加幂等键 draw_id（部分唯一索引，允许 NULL 多次）
+    rg_cols = db.execute('PRAGMA table_info(reward_grants)').fetchall()
+    rg_col_names = [c['name'] for c in rg_cols]
+    if 'draw_id' not in rg_col_names:
+        db.execute('ALTER TABLE reward_grants ADD COLUMN draw_id TEXT')
+    db.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS uq_reward_grants_draw_id '
+        'ON reward_grants(draw_id) WHERE draw_id IS NOT NULL'
+    )
+
     # ===== 迁移：sessions 加历史导入元数据 =====
     # time_precision: date_only 表示时间来自 Excel 仅精确到日期（不伪造具体时刻）
     # import_quality: PARTIAL 表示不完整桌（已知玩家 < 4）

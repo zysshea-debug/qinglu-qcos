@@ -7,15 +7,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-# ===== 测试专用环境变量（必须在 import config 之前设置，非生产凭据）=====
-os.environ.setdefault('QCOS_SECRET_KEY', 'test_secret_key_qcos_unit_test')
-os.environ.setdefault('QCOS_ADMIN_PASSWORD', 'test_admin_pw_qcos_v2')
-
 import config
 _tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
 config.DB_PATH = _tmp.name
 
 import models
+models.DB_PATH = _tmp.name  # 同步绑定，避免写进其他模块的临时库
 models.init_db()
 import app as APP
 
@@ -38,7 +35,7 @@ def bad(name, msg):
 
 
 def login():
-    r = client.post('/api/auth/login', json={'username': 'admin', 'password': os.environ['QCOS_ADMIN_PASSWORD']})
+    r = client.post('/api/auth/login', json={'username': 'admin', 'password': 'admin123'})
     assert r.status_code == 200, r.data
 
 
@@ -108,6 +105,24 @@ def test_member_checkout():
     ok('会员结账')
 
 
+def preview(sid, spid):
+    r = client.get(f'/api/sessions/{sid}/players/{spid}/preview')
+    assert r.status_code == 200, r.data
+    return r.get_json()
+
+
+def micropay(amount, method='scan_wechat'):
+    r = client.post('/api/payment/micropay', json={
+        'auth_code': '134567890123456',
+        'amount': amount,
+        'method': method
+    })
+    assert r.status_code == 200, r.data
+    mp = r.get_json()
+    assert mp.get('status') == 'SUCCESS' and mp.get('out_trade_no'), mp
+    return mp['out_trade_no']
+
+
 def test_scan_checkout():
     print('\n[2] 微信扫码结账')
     from datetime import datetime, timedelta
@@ -115,7 +130,7 @@ def test_scan_checkout():
     pid = add_player('扫码测试')
     sid, spid = start_session(2, pid, '扫码测试', start)
 
-    r = client.post(f'/api/sessions/{sid}/players/{spid}/checkout', json={
+    body = {
         'payment_method': 'scan_wechat',
         'member_id': None,
         'product_total': 0,
@@ -124,7 +139,15 @@ def test_scan_checkout():
         'is_overnight': False,
         'manual_discount_type': '',
         'manual_discount_value': 0
-    })
+    }
+    # 同一进程内其他测试套件可能已把支付通道切到 mock（全局 config 污染），
+    # 此时扫码结账必须先取得支付确认流水，否则门禁会拒绝。
+    if config.PAYMENT.get('provider'):
+        p = preview(sid, spid)
+        body['checkout_token'] = p['checkout_token']
+        body['payment_ref'] = micropay(p['grand_total'])
+
+    r = client.post(f'/api/sessions/{sid}/players/{spid}/checkout', json=body)
     if r.status_code != 200:
         bad('扫码结账', f'status={r.status_code}, body={r.data[:300]}')
         return

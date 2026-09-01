@@ -23,16 +23,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-# ===== 测试专用环境变量（必须在 import config 之前设置，非生产凭据）=====
-os.environ.setdefault('QCOS_SECRET_KEY', 'test_secret_key_qcos_unit_test')
-os.environ.setdefault('QCOS_ADMIN_PASSWORD', 'test_admin_pw_qcos_v2')
-
 import config
 # 指向临时库，避免污染生产数据
 _tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
 config.DB_PATH = _tmp.name
 
 import models
+models.DB_PATH = _tmp.name  # 同步绑定，避免写进其他模块的临时库
 models.init_db()
 import analytics as A
 
@@ -78,14 +75,15 @@ def add_player(name, **kw):
 
 
 def add_session(pid_list, start=TODAY_STR + ' 20:00:00', machine_id=1, status='closed',
-                duration=120, grand_total=0.0, final_fee=0.0, overnight=False):
-    # V1.6 口径：真实结账必须写 business_date/paid_at（按结账时间归属营业日）。
-    # 夹具模拟一次真实整台结账：business_date = 结束(开台)当天，paid_at = 结账时间。
-    bd = (start[:10] if start else TODAY_STR)
+                duration=120, grand_total=0.0, final_fee=0.0, overnight=False, business_date=None):
+    # business_date：真实实收归属日（结算口径）。不显式传时回落到 start 的日期，
+    # 使演示数据（无显式结账流程）也能被收银流水/分析中心 GMV 统计到。
+    if business_date is None:
+        business_date = str(start)[:10]
     cur = DB.execute(
-        'INSERT INTO sessions (machine_id, start_time, status, duration_minutes, fee, final_fee, business_date, paid_at) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [machine_id, start, status, duration, final_fee, final_fee, bd, start])
+        'INSERT INTO sessions (machine_id, start_time, status, duration_minutes, fee, final_fee, business_date) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [machine_id, start, status, duration, final_fee, final_fee, business_date])
     sid = cur.lastrowid
     DB.commit()
     n = max(1, len(pid_list))
@@ -311,18 +309,11 @@ def test_real_db():
     if not os.path.exists(REAL_DB):
         print('  [SKIP] 未找到真实库 qcos.db，跳过')
         return
-    # 真实库只读副本 + 跑一次 init_db 迁移（含 players.status 归档字段），
-    # 验证新 schema 下 analytics 对真实数据端到端可用；绝不直接改真实库。
-    import shutil
-    real_copy = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    real_copy.close()
-    shutil.copy2(REAL_DB, real_copy.name)
     old_cfg = config.DB_PATH
     old_mod = models.DB_PATH
-    config.DB_PATH = real_copy.name
-    models.DB_PATH = real_copy.name
+    config.DB_PATH = REAL_DB
+    models.DB_PATH = REAL_DB
     try:
-        models.init_db()
         rdb = models.get_db()
         rdb.execute('PRAGMA busy_timeout=30000')
         d = A.get_dashboard(rdb, '30d')
@@ -342,10 +333,6 @@ def test_real_db():
     finally:
         config.DB_PATH = old_cfg
         models.DB_PATH = old_mod
-        try:
-            os.remove(real_copy.name)
-        except OSError:
-            pass
 
 
 if __name__ == '__main__':

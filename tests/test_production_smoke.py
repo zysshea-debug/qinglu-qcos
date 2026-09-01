@@ -23,6 +23,7 @@ _tmp_db.close()
 config.DB_PATH = _tmp_db.name
 
 import models  # noqa: E402
+models.DB_PATH = _tmp_db.name  # 同步绑定，避免 models 缓存的是前序模块的陈旧 DB_PATH
 models.init_db()  # 在临时库建出核心表
 
 import production_smoke_check as psc  # noqa: E402
