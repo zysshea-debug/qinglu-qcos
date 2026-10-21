@@ -78,23 +78,23 @@ def format_duration_backend(minutes):
 
 
 def _charged_extra_minutes(rem, buffer, step):
-    """超出整小时的零碎分钟(rem)应计费的分钟数（缓冲阶梯规则表）。
+    """超出整小时的零碎分钟(rem)应计费的分钟数（缓冲阶梯规则）。
 
     仅作用于「首小时之后的零碎时间」；整小时已按 full*rate 计。
-    规则（buffer=10, step=10）：
-      0-10 免费；11-20 计10；21-30 计30；31-40 计40；41-50 计50；51-60 计60。
-    该表为规范文本（第三节），与示例 60/65/70/75/90/110 一致。
+    规则（buffer=10, step=10）：先扣除 buffer 分钟免费缓冲，剩余部分按 step
+    分钟向上取整（阶梯计费）：
+      0-10 免费；11-20 计10；21-30 计20；31-40 计30；41-50 计40；51-59 计50。
+    等价于 ceil(max(rem - buffer, 0) / step) * step。
+    早期实现曾在 k>=2 时返回 (k+1)*step，导致 21 分钟起多算一个阶梯（即把已
+    扣除的免费缓冲重新计入收费）——现已修正为 k*step。
     """
     if rem <= buffer:
         return 0
     over = rem - buffer
-    k = (over + step - 1) // step  # 第几档（从1开始）
+    k = (over + step - 1) // step  # ceil(over / step)，第几档（从1开始）
     if k <= 0:
         return 0
-    if k == 1:
-        return step
-    # 第2档起：step, 3*step, 4*step ...（与规则表一致）
-    return (k + 1) * step
+    return k * step
 
 
 def compute_hourly_fee(minutes, rate, settings=None):
@@ -167,10 +167,12 @@ def get_billing_explanation(machine_type, start, end, settings, is_overnight=Tru
             'mode': mode, 'is_overnight': False,
             'duration_minutes': round(total_minutes, 1),
             'duration_label': format_duration_backend(total_minutes),
+            'full_hours': 0,
             'base_fee': 0.0, 'base_label': '小时费',
-            'extra_minutes': 0, 'extra_charged_minutes': 0, 'extra_fee': 0.0,
+            'extra_minutes': 0, 'buffer_minutes': buffer,
+            'actual_over_minutes': 0, 'extra_charged_minutes': 0, 'extra_fee': 0.0,
             'subtotal': 0.0, 'total': 0,
-            'buffer_minutes': buffer, 'step_minutes': step, 'has_buffer': True,
+            'step_minutes': step, 'has_buffer': True,
             'note': '',
         }
 
@@ -190,30 +192,70 @@ def get_billing_explanation(machine_type, start, end, settings, is_overnight=Tru
         else:
             extra_charged = 0
             extra_fee = 0.0
+    # 实际超出 = 扣除免费缓冲后仍需计费的分钟（仅在确有追加时才 > 0）
+    actual_over = max(rem - buffer, 0) if extra_charged > 0 else 0
     subtotal = base_fee + extra_fee
     return {
         'mode': mode, 'is_overnight': False,
         'duration_minutes': round(total_minutes, 1),
         'duration_label': format_duration_backend(total_minutes),
+        'full_hours': int(full),
         'base_fee': round(base_fee, 2),
-        'base_label': '首小时(最低消费)' if full == 0 else '小时费',
+        'base_label': '整小时' if full > 0 else '首小时(最低消费)',
         'extra_minutes': int(rem),
+        'buffer_minutes': buffer,
+        'actual_over_minutes': int(actual_over),
         'extra_charged_minutes': int(extra_charged),
         'extra_fee': round(extra_fee, 2),
         'subtotal': round(subtotal, 2),
         'total': _round_int(fee),
-        'buffer_minutes': buffer, 'step_minutes': step, 'has_buffer': True,
+        'step_minutes': step, 'has_buffer': True,
         'note': f"每小时结束享 {buffer} 分钟免费缓冲，超出按 {step} 分钟阶梯计费（标准价 ¥{rate}/h）。",
     }
+
+
+def _merge_non_overnight_segments(segments):
+    """非通宵模式：把 00:00-08:00 凌晨窗口并入相邻正常时段，作为同一连续场计费。
+
+    修复 BUG A：普通计时跨 00:00 不得「重置计时 / 新开收费周期 / 重新收最低1小时 /
+    把凌晨几分钟单独收¥X」。做法：将 period=='overnight' 的段改写为 'normal'，并把
+    首尾相接的连续 'normal' 段合并成一段，再按整段时长计一次普通台费。
+
+    仅在 calculate_fee(is_overnight=False) 时调用；通宵(is_overnight=True)保持分时段
+    （含 00:00-08:00 包夜 flat），不受影响。
+    """
+    merged = []
+    for seg in segments:
+        seg = dict(seg)
+        if seg['period'] == 'overnight':
+            seg['period'] = 'normal'
+        if merged and merged[-1]['period'] == 'normal' and seg['period'] == 'normal':
+            last = merged[-1]
+            last_end = datetime.fromisoformat(last['end'])
+            cur_start = datetime.fromisoformat(seg['start'])
+            if last_end == cur_start:
+                merged[-1] = {
+                    'period': 'normal',
+                    'start': last['start'],
+                    'end': seg['end'],
+                    'minutes': round(last['minutes'] + seg['minutes'], 1),
+                }
+                continue
+        merged.append(seg)
+    return merged
 
 
 def calculate_fee(machine_type, start, end, settings, is_overnight=True):
     """计算台费，返回 (total_fee, breakdown)
 
     Args:
-        is_overnight: 是否应用通宵包夜费率；False 时 00:00-08:00 按正常小时费率计费
+        is_overnight: 是否应用通宵包夜费率；False 时 00:00-08:00 按正常小时费率计费，
+            且不再按午夜拆段（视为同一连续场，见 _merge_non_overnight_segments）。
     """
     segments = split_session(start, end)
+    if not is_overnight:
+        # BUG A 修复：普通计时跨午夜 = 同一连续场，不得按 00:00 拆段并对凌晨小段单独收最低1小时。
+        segments = _merge_non_overnight_segments(segments)
 
     breakdown = []
     total_fee = 0

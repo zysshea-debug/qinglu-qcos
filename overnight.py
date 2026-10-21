@@ -2,15 +2,15 @@
 
 三层时间模型：
   - start_time:        真实开台时间
-  - auto_end_at:       系统默认保护截止（start + 8h，封顶 11:00）
+  - auto_end_at:       系统默认保护截止（青鹭固定通宵窗口 00:00~08:00，详见 compute_auto_end_at）
   - actual_end_time:   人工确认真实结束时间
 
 时间优先级（所有 preview / checkout / payment 统一使用 effective_end_time）：
   actual_end_time  >  auto_end_at(已触发自动截止)  >  now
 
 设计要点：
-  - 11:00 只是「系统默认自动截止线」，不是禁止玩家继续玩的硬上限；
-    人工明确延长 / 事后确认实际结束时间可晚于 11:00（代表真实经营决定）。
+  - 通宵业务窗口固定为 00:00~08:00，auto_end_at 默认 = 该窗口结束时刻 08:00（不再是 start+8h）；
+    人工明确延长 / 事后确认实际结束时间可晚于 08:00（代表真实经营决定）。
   - auto_end_at 到达只停止默认时间增长，绝不自动付款 / 自动结账。
   - 无人值班后第二天，员工可事后把 actual_end_time 改为真实离开时间，重算账单。
   - 全部数据库操作都作用在传入的 db 连接上（不自行打开连接），便于测试注入临时库。
@@ -51,16 +51,34 @@ def _parse_dt(x):
 
 
 def compute_auto_end_at(start_time, now=None):
-    """计算系统默认保护截止。
+    """计算系统默认保护截止（青鹭固定通宵窗口 00:00~08:00）。
 
     仅对通宵桌有意义（调用方先判断 is_overnight）。
-    规则：start + 8h，封顶到「start+8h 所在自然日的 11:00」。
+
+    BUG B 修复：不再使用「start + 8h」。青鹭通宵业务窗口固定为 00:00~08:00，系统默认
+    截止 = 该窗口的结束时刻 08:00：
+      - 若开台时刻在当日 00:00(含)~08:00 之间（已处于凌晨窗口）：截止 = 当日 08:00；
+      - 否则（傍晚/夜间开台）：截止 = 次日 08:00。
 
     验证：
-      23:00 -> 07:00(次日)   23:30 -> 07:30   00:00 -> 08:00
-      00:30 -> 08:30         01:00 -> 09:00   02:00 -> 10:00
-      02:30 -> 10:30         03:00 -> 11:00   03:30 -> 11:00   04:00 -> 11:00
+      21:46 -> 次日 08:00    23:30 -> 次日 08:00    00:00 -> 当日 08:00
+      00:30 -> 当日 08:00    02:00 -> 当日 08:00    07:30 -> 当日 08:00
     """
+    start = _parse_dt(start_time)
+    if start is None:
+        return None
+    if start.hour < 8:
+        deadline_day = start.date()
+    else:
+        deadline_day = (start + timedelta(days=1)).date()
+    return start.replace(
+        year=deadline_day.year, month=deadline_day.month, day=deadline_day.day,
+        hour=8, minute=0, second=0, microsecond=0,
+    )
+
+
+def _legacy_auto_end_at(start_time):
+    """旧规则（start + 8h 封顶 11:00）——仅用于识别并刷新存量默认截止值，不再用于新开台。"""
     start = _parse_dt(start_time)
     if start is None:
         return None
@@ -140,27 +158,42 @@ def session_overnight_status(session_row, now=None):
 # ====================== DB 层（作用在传入连接上）======================
 
 def reap_overnight_sessions(db, now=None):
-    """将已越过 auto_end_at 的活跃通宵桌标记为 auto_ended=1（幂等）。
+    """将已越过 auto_end_at 的活跃通宵桌标记为 auto_ended=1（幂等），
+    并把仍停留为「旧默认截止（start+8h 封顶 11:00）」的活跃通宵桌刷新为固定 08:00 窗口。
 
     离线补偿（requirement 18）：QCOS 重启后发现通宵桌已超时，
-    恢复 auto_ended=1、auto_end_at 不变（=默认截止）、end_time_confirmed=0，
-    绝不写成 now（避免把「13:00 重启」误判为结束时间）。
+    恢复 auto_ended=1、绝不写成 now（避免把「13:00 重启」误判为结束时间）。
+    刷新仅覆盖「仍为旧默认」的活跃（未 auto_ended）桌，避免误清人工延长的自定义截止。
     """
     now = now or datetime.now()
     rows = db.execute(
-        """SELECT id, auto_end_at FROM sessions
+        """SELECT id, start_time, auto_end_at FROM sessions
            WHERE status='active' AND is_overnight=1 AND auto_ended=0
              AND auto_end_at IS NOT NULL"""
     ).fetchall()
     count = 0
     for r in rows:
+        start = _parse_dt(r['start_time'])
         auto = _parse_dt(r['auto_end_at'])
-        if auto is not None and now >= auto:
+        if start is None or auto is None:
+            continue
+        # 已越过默认截止 -> 标记 auto_ended（不写 now）
+        if now >= auto:
             db.execute(
                 "UPDATE sessions SET auto_ended=1, auto_end_reason=? WHERE id=?",
                 [AUTO_END_REASON_DEADLINE, r['id']]
             )
             count += 1
+            continue
+        # 仍为旧默认截止 -> 刷新为固定 08:00 窗口（不影响人工延长值）
+        if auto == _legacy_auto_end_at(start):
+            new_auto = compute_auto_end_at(start)
+            if new_auto is not None and new_auto != auto:
+                db.execute(
+                    "UPDATE sessions SET auto_end_at=? WHERE id=?",
+                    [new_auto.isoformat(timespec='seconds'), r['id']]
+                )
+                count += 1
     return count
 
 

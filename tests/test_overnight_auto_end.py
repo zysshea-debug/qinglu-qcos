@@ -1,8 +1,8 @@
 """QCOS 通宵桌动态截止 + 灵活实际结束时间 V3 —— 测试套件
 
 设计目标（对齐需求）：
-  - 三层时间模型：start_time / auto_end_at(系统默认保护截止,start+8h封顶11:00) / actual_end_time(人工确认真实结束)
-  - 11:00 只是「系统默认自动截止线」，不是禁止玩家继续玩的硬上限；人工延长 / 事后确认可晚于 11:00
+  - 三层时间模型：start_time / auto_end_at(系统默认保护截止,青鹭固定通宵窗口 00:00~08:00) / actual_end_time(人工确认真实结束)
+  - 通宵业务窗口固定 00:00~08:00（不再是 start+8h）；人工延长 / 事后确认可晚于 08:00
   - auto_end_at 到达只停止默认时间增长，绝不自动付款 / 自动结账
   - 统一 effective_end_time 优先级：actual_end_time > auto_end_at(已触发) > now
   - 离线补偿：服务重启后把越过 auto_end_at 的活跃通宵桌标 auto_ended=1（绝不成 now）
@@ -209,21 +209,21 @@ def main():
         init_db()
         login()
 
-        print('\n===== 一、compute_auto_end_at 默认规则（start+8h 封顶 11:00）=====')
+        print('\n===== 一、compute_auto_end_at 默认规则（青鹭固定通宵窗口 00:00~08:00）=====')
 
         # 1
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 18, 23, 0))
-            assert r == datetime(2026, 8, 19, 7, 0), r
-            ok('23:00 开台 -> 次日 07:00')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('23:00 开台 -> 次日 08:00')
         except Exception as e:
             bad('compute 23:00', str(e))
 
         # 2
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 18, 23, 30))
-            assert r == datetime(2026, 8, 19, 7, 30), r
-            ok('23:30 -> 07:30')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('23:30 -> 次日 08:00')
         except Exception as e:
             bad('compute 23:30', str(e))
 
@@ -231,39 +231,39 @@ def main():
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 19, 0, 0))
             assert r == datetime(2026, 8, 19, 8, 0), r
-            ok('00:00 -> 08:00')
+            ok('00:00 -> 当日 08:00')
         except Exception as e:
             bad('compute 00:00', str(e))
 
         # 4
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 19, 2, 30))
-            assert r == datetime(2026, 8, 19, 10, 30), r
-            ok('02:30 -> 10:30')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('02:30 -> 当日 08:00')
         except Exception as e:
             bad('compute 02:30', str(e))
 
         # 5
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 19, 3, 0))
-            assert r == datetime(2026, 8, 19, 11, 0), r
-            ok('03:00 -> 11:00（封顶生效）')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('03:00 -> 当日 08:00')
         except Exception as e:
             bad('compute 03:00', str(e))
 
         # 6
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 19, 4, 0))
-            assert r == datetime(2026, 8, 19, 11, 0), r
-            ok('04:00 -> 11:00（04+8=12 > 11，封顶）')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('04:00 -> 当日 08:00')
         except Exception as e:
             bad('compute 04:00', str(e))
 
         # 7
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 8, 19, 2, 0))
-            assert r == datetime(2026, 8, 19, 10, 0), r
-            ok('02:00 -> 10:00')
+            assert r == datetime(2026, 8, 19, 8, 0), r
+            ok('02:00 -> 当日 08:00')
         except Exception as e:
             bad('compute 02:00', str(e))
 
@@ -450,11 +450,11 @@ def main():
                 overnight.ensure_auto_end_at(db, sid, True, datetime(2026, 8, 18, 23, 0))
             row = get_session(sid)
             assert row['is_overnight'] == 1
-            assert row['auto_end_at'] == iso(datetime(2026, 8, 19, 7, 0)), row['auto_end_at']
+            assert row['auto_end_at'] == iso(datetime(2026, 8, 19, 8, 0)), row['auto_end_at']
             # 幂等：再次调用不应覆盖已设置的 deadline
             with dbconn() as db:
                 overnight.ensure_auto_end_at(db, sid, True, datetime(2026, 8, 18, 23, 0))
-            assert get_session(sid)['auto_end_at'] == iso(datetime(2026, 8, 19, 7, 0))
+            assert get_session(sid)['auto_end_at'] == iso(datetime(2026, 8, 19, 8, 0))
             ok('ensure：通宵写入默认截止；二次调用不覆盖（幂等）')
         except Exception as e:
             bad('ensure 通宵', str(e))
@@ -581,16 +581,16 @@ def main():
         # 31 跨月
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 1, 31, 23, 0))
-            assert r == datetime(2026, 2, 1, 7, 0), r
-            ok('跨月：01-31 23:00 -> 02-01 07:00')
+            assert r == datetime(2026, 2, 1, 8, 0), r
+            ok('跨月：01-31 23:00 -> 02-01 08:00')
         except Exception as e:
             bad('跨月', str(e))
 
         # 32 跨年
         try:
             r = overnight.compute_auto_end_at(datetime(2026, 12, 31, 23, 0))
-            assert r == datetime(2027, 1, 1, 7, 0), r
-            ok('跨年：12-31 23:00 -> 次年 01-01 07:00')
+            assert r == datetime(2027, 1, 1, 8, 0), r
+            ok('跨年：12-31 23:00 -> 次年 01-01 08:00')
         except Exception as e:
             bad('跨年', str(e))
 

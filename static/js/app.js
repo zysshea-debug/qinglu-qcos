@@ -541,12 +541,15 @@ function renderCheckoutFee() {
     if (exp && exp.has_buffer) {
         let rows = '';
         rows += `<div class="d-flex justify-content-between"><span>游玩时长</span><strong>${exp.duration_label}</strong></div>`;
-        rows += `<div class="d-flex justify-content-between"><span>${exp.base_label}</span><strong>${money(exp.base_fee)}</strong></div>`;
-        if (exp.extra_minutes > 0) {
-            const chargedNote = exp.extra_charged_minutes !== exp.extra_minutes
-                ? `（计费 ${exp.extra_charged_minutes} 分钟）` : '';
-            rows += `<div class="d-flex justify-content-between"><span>超出首小时</span><strong>${exp.extra_minutes} 分钟${chargedNote}</strong></div>`;
+        rows += `<div class="d-flex justify-content-between"><span>${exp.base_label}${exp.full_hours ? '（' + exp.full_hours + '小时）' : ''}</span><strong>${money(exp.base_fee)}</strong></div>`;
+        if (exp.extra_charged_minutes > 0) {
+            rows += `<div class="d-flex justify-content-between"><span>超出整小时</span><strong>${exp.extra_minutes} 分钟</strong></div>`;
+            rows += `<div class="d-flex justify-content-between"><span>免费缓冲</span><strong>${exp.buffer_minutes} 分钟</strong></div>`;
+            rows += `<div class="d-flex justify-content-between"><span>实际超出</span><strong>${exp.actual_over_minutes} 分钟</strong></div>`;
+            rows += `<div class="d-flex justify-content-between"><span>计费时长</span><strong>${exp.extra_charged_minutes} 分钟</strong></div>`;
             rows += `<div class="d-flex justify-content-between"><span>追加（缓冲阶梯）</span><strong>${money(exp.extra_fee)}</strong></div>`;
+        } else if (exp.extra_minutes > 0) {
+            rows += `<div class="d-flex justify-content-between text-muted"><span>超出整小时</span><strong>${exp.extra_minutes} 分钟（免费缓冲内，无追加）</strong></div>`;
         }
         rows += `<div class="d-flex justify-content-between border-top mt-1 pt-1"><span>合计</span><strong class="text-primary">${money(exp.total)}</strong></div>`;
         if (exp.note) rows += `<div class="text-muted mt-1">${exp.note}</div>`;

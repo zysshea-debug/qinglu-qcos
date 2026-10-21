@@ -6,7 +6,7 @@
   - legacy Excel 导入写 sessions.status='completed'，而部分查询只认 'closed'，
     存在叠加缺口。
   - 门店进行中：四口机1 4 名 playing 每人 65，salty 未结商品 6
-    -> PLAYER_LEVEL_TOTAL=266，但旧逻辑 in_progress_estimate=69。
+    -> PLAYER_LEVEL_TOTAL=258，但旧逻辑 in_progress_estimate=69。
 
 本测试验证 V1.6.1 兼容层：
   1. pre-V16 checked_out + 无 business_date -> 可见（NATIVE_PRE_V16）
@@ -28,7 +28,7 @@
   17. void V1.6 记录仍正常排除
   18. 历史记录不会被无声过滤（每条至少 VISIBLE_*）
   19. 历史兼容不计入真实 GMV（GMV 口径与可见性分离）
-  20. in_progress_estimate 4×65+6 = 266（玩家级修复保留）
+  20. in_progress_estimate 4×63+6 = 258（玩家级修复保留；63 为 BUG A 连续计费正确值，旧 62 为拆段取整副产物）
 
 安全：临时 SQLite（conftest 建库）+ API 只读写临时库，不触碰真实 qcos.db。
 """
@@ -591,7 +591,7 @@ def test_history_not_in_real_gmv():
 
 
 def test_in_progress_estimate_266():
-    """门店现场场景：四口 4 人 playing 每人 65 + salty 未结商品 6 -> 266（非 69）。"""
+    """门店现场场景：四口 4 人 playing 每人 63（BUG A 连续计费正确值）+ salty 未结商品 6 -> 258（非 69）。"""
     db = DB
     sid = _insert_session(db, M4, START_65, end=None, status='active', final_fee=None)
     sp_ids = []
@@ -609,7 +609,7 @@ def test_in_progress_estimate_266():
         [sid, sp_ids[3], '可乐', 1, 6, 6])
     db.commit()
     est = revenue.in_progress_estimate(db, now=FAKE_NOW)
-    assert est == 266, f'4×65+6 应为 266，实际 {est}（旧逻辑只得 69）'
+    assert est == 258, f'4×63+6 应为 258，实际 {est}（旧逻辑只得 69；63 为 BUG A 连续计费正确值）'
 
 
 def test_in_progress_estimate_same_as_table_overview_266():
@@ -635,6 +635,6 @@ def test_in_progress_estimate_same_as_table_overview_266():
             except (ValueError, TypeError):
                 s[row['key']] = v
     per = billing.calculate_fee('4port', START_65, FAKE_NOW, s, is_overnight=False)[0]
-    assert per == 65, f'台桌总览单玩家应为 65，实际 {per}'
+    assert per == 63, f'台桌总览单玩家应为 63（BUG A 连续计费正确值），实际 {per}'
     est = revenue.in_progress_estimate(db, now=FAKE_NOW)
     assert est == 4 * per, f'预计应收应等于 4×台桌总览单玩家金额，实际 {est}'

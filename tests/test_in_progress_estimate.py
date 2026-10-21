@@ -7,8 +7,8 @@
   4×¥58+¥6 被算成「1 份台费 + 整桌未结商品」。
 
 本测试验证修复后口径（必须玩家级汇总）：
-  1. 四口桌 4 人同时 playing，每人预计 58 -> 预计台费 232
-  2. 其中 1 人未结商品 6 -> 总预计 238（58×4 + 6，防 58+6+6 重复）
+  1. 四口桌 4 人同时 playing，每人预计 57 -> 预计台费 228
+  2. 其中 1 人未结商品 6 -> 总预计 238（57×4 + 6，防 57+6+6 重复）
   3. 其中 1 人已经单人结账 -> 不再计该玩家
   4. 商品已 settled -> 不再计商品
   5. 两张 active 桌 -> 全部汇总
@@ -53,8 +53,9 @@ from models import get_db
 
 # 假时钟：四口机 22:00 开台（非通宵），跨午夜到次日 03:46
 FAKE_NOW = datetime(2026, 8, 24, 3, 46)
-# 四口机 ¥10/h；22:00->24:00 = 2h = 20；00:00->03:46 非通宵 226min = 38；合计 58
-EXPECT_FEE_PER_PLAYER = 58
+# 四口机 ¥10/h；22:00->24:00 = 2h = 20；00:00->03:46 非通宵 226min = 37；合计 57
+# （缓冲阶梯修正后：226min 余46 -> 先扣10剩36 -> 计40min -> 6.67，整段 20+37=57）
+EXPECT_FEE_PER_PLAYER = 57
 
 # 默认机器：1=八口机1(8port) 2=八口机2(8port) 3=四口机1(4port) 4=四口机2(4port)
 M4 = 3   # 四口机1
@@ -131,7 +132,7 @@ def seed():
 
 
 def test_4p_4port_expected_fee_232():
-    """场景1：四口桌 4 人同时 playing，每人预计 58 -> 232（旧实现只得 58）。"""
+    """场景1：四口桌 4 人同时 playing，每人预计 57 -> 228（旧实现只得 57）。"""
     sid, sp_ids = _make_4p_4port_table()
     est = revenue.in_progress_estimate(get_db(), now=FAKE_NOW)
     assert est == 4 * EXPECT_FEE_PER_PLAYER, \
@@ -139,7 +140,7 @@ def test_4p_4port_expected_fee_232():
 
 
 def test_one_player_product_6_total_238():
-    """场景2：其中 1 人未结商品 6 -> 总预计 238 = 232 + 6（防 58+6 变 58+6+6）。"""
+    """场景2：其中 1 人未结商品 6 -> 总预计 238 = 228 + 6（防 57+6 变 57+6+6）。"""
     db = get_db()
     sid, sp_ids = _make_4p_4port_table()
     _insert_product(db, sid, sp_ids[0], 6, status='UNSETTLED')
@@ -150,7 +151,7 @@ def test_one_player_product_6_total_238():
 
 
 def test_checked_out_player_excluded():
-    """场景3：其中 1 人已单人结账 -> 不再计该玩家，预计 = 3×58 = 174。"""
+    """场景3：其中 1 人已单人结账 -> 不再计该玩家，预计 = 3×57 = 171。"""
     db = get_db()
     sid, sp_ids = _make_4p_4port_table()
     db.execute(
@@ -165,7 +166,7 @@ def test_checked_out_player_excluded():
 
 
 def test_settled_product_excluded():
-    """场景4：商品已 SETTLED -> 不再计商品，预计 = 232（台费照常）。"""
+    """场景4：商品已 SETTLED -> 不再计商品，预计 = 228（台费照常）。"""
     db = get_db()
     sid, sp_ids = _make_4p_4port_table()
     _insert_product(db, sid, sp_ids[0], 6, status='SETTLED')
@@ -177,24 +178,24 @@ def test_settled_product_excluded():
 
 def test_two_active_tables_summed():
     """场景5：两张 active 桌全部汇总。
-    桌A 四口 4 人(22:00) = 232；
-    桌B 八口 2 人(23:00) = 2×(20 + 77) = 194；合计 426。
+    桌A 四口 4 人(22:00) = 228；
+    桌B 八口 2 人(23:00) = 2×93 = 186；合计 414。
     """
     db = get_db()
-    sid_a, _ = _make_4p_4port_table()          # 四口 4 人 -> 232
-    start_b = datetime(2026, 8, 23, 23, 0)      # 八口 2 人 -> 每人 97
+    sid_a, _ = _make_4p_4port_table()          # 四口 4 人 -> 228
+    start_b = datetime(2026, 8, 23, 23, 0)      # 八口 2 人 -> 每人 93
     sid_b = _insert_session(db, M8, start_b, is_overnight=0)
     for i in range(1, 3):
         _insert_player(db, sid_b, f'乙桌玩家{i}', start_b)
     db.commit()
 
     est = revenue.in_progress_estimate(db, now=FAKE_NOW)
-    expected = 4 * EXPECT_FEE_PER_PLAYER + 2 * 97
+    expected = 4 * EXPECT_FEE_PER_PLAYER + 2 * 93
     assert est == expected, f'两桌应汇总为 {expected}，实际 {est}'
 
 
 def test_normal_table_daytime():
-    """场景6：普通桌（白天正常时段）——四口 4 人 13:00 开台，15:30 每人 25 -> 100。"""
+    """场景6：普通桌（白天正常时段）——四口 4 人 13:00 开台，15:30 每人 23 -> 92。"""
     db = get_db()
     start = datetime(2026, 8, 24, 13, 0)
     now = datetime(2026, 8, 24, 15, 30)
@@ -203,8 +204,8 @@ def test_normal_table_daytime():
         _insert_player(db, sid, f'玩家{i}', start)
     db.commit()
     est = revenue.in_progress_estimate(db, now=now)
-    # 13:00->15:30 = 150min -> full=2, rem=30>10 -> 额外30min -> 2*10+5=25
-    assert est == 4 * 25, f'普通桌应为 100，实际 {est}'
+    # 13:00->15:30 = 150min -> full=2, rem=30>10 -> 先扣10剩20 -> 计20min -> 2*10+3.33=23
+    assert est == 4 * 23, f'普通桌应为 92，实际 {est}'
 
 
 def test_overnight_table_flat():
@@ -220,11 +221,11 @@ def test_overnight_table_flat():
 
 
 def test_cross_midnight_active():
-    """场景8：跨午夜 active（22:00 -> 次日 03:46），每人 58（非通宵阶梯）。"""
+    """场景8：跨午夜 active（22:00 -> 次日 03:46），每人 57（非通宵阶梯）。"""
     db = get_db()
     sid, sp_ids = _make_4p_4port_table(datetime(2026, 8, 23, 22, 0))
     est = revenue.in_progress_estimate(db, now=FAKE_NOW)
-    assert est == 232, f'跨午夜桌应为 232，实际 {est}'
+    assert est == 228, f'跨午夜桌应为 228，实际 {est}'
     # 单玩家台费与台桌总览引擎一致（calculate_fee 同参数）
     s = _settings(db)
     fee, _ = billing.calculate_fee('4port', datetime(2026, 8, 23, 22, 0), FAKE_NOW, s, is_overnight=False)
@@ -265,7 +266,7 @@ def test_same_player_amount_as_table_overview():
 
 def test_counter_product_not_double_counted():
     """防重复：桌级柜台未结商品（session_player_id IS NULL）只计一次。
-    场景：4 人桌（232）+ 1 人未结商品 6 + 柜台未结商品 4 = 242。
+    场景：4 人桌（228）+ 1 人未结商品 6 + 柜台未结商品 4 = 238。
     若把整桌商品 SUM 与玩家商品都加一遍会得到 248（重复计了玩家商品）。
     """
     db = get_db()
@@ -279,7 +280,7 @@ def test_counter_product_not_double_counted():
     )
     db.commit()
     est = revenue.in_progress_estimate(db, now=FAKE_NOW)
-    expected = 4 * EXPECT_FEE_PER_PLAYER + 6 + 4   # 232 + 6 + 4 = 242
+    expected = 4 * EXPECT_FEE_PER_PLAYER + 6 + 4   # 228 + 6 + 4 = 238
     assert est == expected, f'应为 {expected}，实际 {est}（柜台商品不得与玩家商品重复/漏算）'
 
 

@@ -60,15 +60,17 @@ _orig_overnight_dt = overnight.datetime
 _orig_analytics_now = A._now
 _orig_analytics_today = A._today
 
-revenue.datetime = _FC
-overnight.datetime = _FC
-# app 内是 `from datetime import datetime`，其 datetime.now() 不影响金额归属
-# （归属只用 revenue.business_date_for / revenue.shanghai_now / overnight.effective_end_time）
+# 注意：revenue/overnight 的 datetime 替换移至下方 fixture 的 setup 阶段，
+# 仅在「本模块测试期间」生效，绝不在 import 期污染同进程其它模块（曾导致
+# test_bug_a_b_c 等模块在 import 后即读到被替换的 overnight.datetime，使
+# compute_auto_end_at 的 isinstance 判定失效返回 None）。
 
 
 @pytest.fixture(autouse=True, scope='module')
 def _restore_clock_after_module():
-    """模块测试结束后恢复真实时钟引用，避免污染同进程内后续测试模块。"""
+    """本模块测试期间替换时钟，结束后恢复真实引用，避免跨模块污染。"""
+    revenue.datetime = _FC
+    overnight.datetime = _FC
     yield
     revenue.datetime = _orig_revenue_dt
     overnight.datetime = _orig_overnight_dt

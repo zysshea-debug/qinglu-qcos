@@ -91,12 +91,12 @@ print('[3] 10分钟阶梯计费')
 check('八口 75分钟 = 23', billing.compute_hourly_fee(75, 20, S) == 23)
 # 80min: 超出20min -> 计10min（规则表 11-20 增加10分钟）= 23
 check('八口 80分钟 = 23（规则表：11-20分钟增加10分钟费用）', billing.compute_hourly_fee(80, 20, S) == 23)
-# 90min: 超出30min -> 计30min = 10 -> 30
-check('八口 90分钟 = 30', billing.compute_hourly_fee(90, 20, S) == 30)
-# 110min: 超出50min -> 计50min = 16.67 -> 37
-check('八口 110分钟 = 37', billing.compute_hourly_fee(110, 20, S) == 37)
-# 100min: 超出40min -> 计40min = 13.33 -> 33
-check('八口 100分钟 = 33', billing.compute_hourly_fee(100, 20, S) == 33)
+# 90min: 超出30min -> 先扣10缓冲剩20 -> 计20min = 6.67 -> 27
+check('八口 90分钟 = 27', billing.compute_hourly_fee(90, 20, S) == 27)
+# 110min: 超出50min -> 先扣10缓冲剩40 -> 计40min = 13.33 -> 33
+check('八口 110分钟 = 33', billing.compute_hourly_fee(110, 20, S) == 33)
+# 100min: 超出40min -> 先扣10缓冲剩30 -> 计30min = 10 -> 30
+check('八口 100分钟 = 30', billing.compute_hourly_fee(100, 20, S) == 30)
 
 # ============================================================
 # 4. 跨小时连续计费
@@ -113,15 +113,15 @@ check('八口 180分钟 = 60（3小时）', billing.compute_hourly_fee(180, 20, 
 print('[5] 四口机价格')
 check('四口 75分钟 = 12', billing.compute_hourly_fee(75, 10, S) == 12)
 check('四口 80分钟 = 12', billing.compute_hourly_fee(80, 10, S) == 12)
-check('四口 90分钟 = 15', billing.compute_hourly_fee(90, 10, S) == 15)
-check('四口 110分钟 = 18', billing.compute_hourly_fee(110, 10, S) == 18)
+check('四口 90分钟 = 13', billing.compute_hourly_fee(90, 10, S) == 13)
+check('四口 110分钟 = 17', billing.compute_hourly_fee(110, 10, S) == 17)
 check('四口 120分钟 = 20', billing.compute_hourly_fee(120, 10, S) == 20)
 
 # ============================================================
 # 6. 八口机价格（汇总校验）
 # ============================================================
 print('[6] 八口机价格（汇总）')
-for mins, expect in [(60, 20), (65, 20), (70, 20), (75, 23), (80, 23), (90, 30), (110, 37), (120, 40)]:
+for mins, expect in [(60, 20), (65, 20), (70, 20), (75, 23), (80, 23), (90, 27), (110, 33), (120, 40)]:
     check(f'八口 {mins}分钟 = {expect}', billing.compute_hourly_fee(mins, 20, S) == expect)
 
 # ============================================================
