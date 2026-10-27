@@ -39,6 +39,45 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def apply_machine_migration(db):
+    """P0 桌台治理 (2026-10)：按稳定 id 将 machines 同步到 config.MACHINES 定义。
+
+    安全约束（绝不破坏生产数据）：
+    - 仅在 machines 表缺失 area / active 列时 ALTER 追加，不改动任何已有列
+    - 已存在的 id 仅 UPDATE 展示性字段（name/type/area/active/sort_order），
+      绝不触碰运行时 status，绝不删除或重建任何桌台
+    - 缺失的 id（如本次新增的第5张桌）才 INSERT 新行，绝不占用/替换现有 id
+    - 幂等：可重复执行，结果一致；脚本重复运行不会重复新增或改坏 id
+    """
+    cols = db.execute('PRAGMA table_info(machines)').fetchall()
+    col_names = [c['name'] for c in cols]
+    if 'area' not in col_names:
+        db.execute('ALTER TABLE machines ADD COLUMN area TEXT DEFAULT ""')
+    if 'active' not in col_names:
+        db.execute('ALTER TABLE machines ADD COLUMN active INTEGER DEFAULT 1')
+
+    for m in MACHINES:
+        mid = m['id']
+        name = m['name']
+        mtype = m['type']
+        area = m.get('area', '')
+        active = int(m.get('active', 1))
+        sort_order = m['sort_order']
+        existing = db.execute('SELECT id FROM machines WHERE id=?', [mid]).fetchone()
+        if existing:
+            db.execute(
+                'UPDATE machines SET name=?, type=?, area=?, active=?, sort_order=? WHERE id=?',
+                [name, mtype, area, active, sort_order, mid],
+            )
+        else:
+            db.execute(
+                'INSERT INTO machines (id, name, type, area, active, status, sort_order) '
+                'VALUES (?, ?, ?, ?, ?, "idle", ?)',
+                [mid, name, mtype, area, active, sort_order],
+            )
+    db.commit()
+
+
 def init_db():
     db = get_db()
     db.executescript('''
@@ -933,14 +972,9 @@ def init_db():
         )'''
     )
 
-    # 插入默认机器
-    for m in MACHINES:
-        existing = db.execute('SELECT id FROM machines WHERE id=?', [m['id']]).fetchone()
-        if not existing:
-            db.execute(
-                'INSERT INTO machines (id, name, type, status, sort_order) VALUES (?, ?, ?, "idle", ?)',
-                [m['id'], m['name'], m['type'], m['sort_order']]
-            )
+    # 桌台治理 (P0 2026-10)：按稳定 id 同步 machines 到 config 定义
+    # 仅更新展示字段 / 新增缺失 id，绝不删除重建、不改运行时 status
+    apply_machine_migration(db)
 
     # 插入默认设置
     for key, value in DEFAULT_SETTINGS.items():

@@ -2,12 +2,16 @@
 
 import os
 
-# 台桌配置
+# 台桌配置（P0 桌台治理 2026-10：改名 + 新增第5张桌，按稳定 id 关联业务数据）
+# - id 是业务关联主键（sessions.machine_id），绝不修改现有 1~4 的 id
+# - name 仅展示名，可改；type 决定计费费率（8port/4port）；area 区域/楼层；active 启用(1)/停用(0)
+# - 新增第5张桌使用新 id=5，绝不占用/替换现有 id
 MACHINES = [
-    {'id': 1, 'name': '八口机1', 'type': '8port', 'sort_order': 1},
-    {'id': 2, 'name': '八口机2', 'type': '8port', 'sort_order': 2},
-    {'id': 3, 'name': '四口机1', 'type': '4port', 'sort_order': 3},
-    {'id': 4, 'name': '四口机2', 'type': '4port', 'sort_order': 4},
+    {'id': 1, 'name': '楼下V1八口', 'type': '8port', 'area': '楼下', 'active': 1, 'sort_order': 1},
+    {'id': 2, 'name': '楼下V2八口', 'type': '8port', 'area': '楼下', 'active': 1, 'sort_order': 2},
+    {'id': 3, 'name': '大厅四口',   'type': '4port', 'area': '大厅', 'active': 1, 'sort_order': 3},
+    {'id': 4, 'name': '楼上V3四口', 'type': '4port', 'area': '楼上', 'active': 1, 'sort_order': 4},
+    {'id': 5, 'name': '楼上V4八口', 'type': '8port', 'area': '楼上', 'active': 1, 'sort_order': 5},
 ]
 
 MACHINE_TYPE_LABELS = {
