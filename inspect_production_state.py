@@ -42,6 +42,11 @@ def reason(ok, text):
     REASONS.append(("OK " if ok else "NO ", text))
 
 
+def row_to_dict(row):
+    """sqlite3.Row 不支持 .get()；统一转为 dict，便于 .get/keys 安全访问，杜绝 AttributeError。"""
+    return {k: row[k] for k in row.keys()}
+
+
 # --------------------------------------------------------------------------
 # 进程识别（仅用 subprocess 读取，绝不写）
 # --------------------------------------------------------------------------
@@ -174,10 +179,12 @@ def main():
     print("\n[2] 运行进程与 PID 文件")
     pid_file = PROJECT_ROOT / "runtime" / "qcos.pid"
     pid_from_file = None
+    pid_file_ok = False
     print("  PID_FILE            =", pid_file)
     if pid_file.exists():
         try:
             pid_from_file = int(pid_file.read_text(encoding="utf-8").strip())
+            pid_file_ok = True
             print("  PID(文件)           =", pid_from_file)
         except Exception as e:
             print("  [警告] 读取 PID 文件失败：", e)
@@ -185,7 +192,7 @@ def main():
         print("  [警告] 未找到 runtime/qcos.pid（服务可能未以 qcos_server.py 启动，或部署路径不同）")
 
     qcos_procs = list_qcos_processes()
-    print("  当前机器含 'qcos_server' 的 python 进程：")
+    print("  当前机器含 'qcos_server' 的 python 进程（参考）：")
     if qcos_procs:
         for p in qcos_procs:
             print("    PID=%-6s EXE=%s" % (p["pid"], p["exe"]))
@@ -193,25 +200,45 @@ def main():
     else:
         print("    （未发现任何 qcos_server 进程）")
 
-    proc_info = None
-    if pid_from_file:
-        proc_info = get_process_by_pid(pid_from_file)
-        print("  PID 文件对应进程信息：")
-        if proc_info:
-            print("    PID=%-6s EXE=%s" % (proc_info["pid"], proc_info["exe"]))
-            print("            CMD=%s" % proc_info["cmd"])
-        else:
-            print("    [警告] PID=%s 当前不存在（进程已退出 / 服务不在运行）" % pid_from_file)
-
-    # 一致性判断
-    pid_matches = bool(pid_from_file and proc_info and int(proc_info.get("pid", -1)) == pid_from_file)
+    # 严格进程校验：仅当下列【全部】成立，才允许“PID 文件与实际进程一致 = YES”：
+    #   ① 确实找到活跃进程；② PID 等于 runtime/qcos.pid；
+    #   ③ ExecutablePath 可读取且非空；④ CommandLine 可读取且非空；
+    #   ⑤ CommandLine 明确包含当前项目根目录下的 qcos_server.py
+    # 任一不满足（含查询权限不足 / 命令失败）→ NO，绝不默认 YES。
+    pid_ok = False
+    exe_ok = False
+    cmd_ok = False
     cmd_points_here = False
-    if proc_info and proc_info.get("cmd"):
-        cmd = proc_info["cmd"].replace("\\", "/").lower()
-        root_lower = str(PROJECT_ROOT).replace("\\", "/").lower()
-        cmd_points_here = ("qcos_server.py" in cmd) and (root_lower in cmd)
+    if pid_file_ok and pid_from_file:
+        proc = get_process_by_pid(pid_from_file)
+        if proc is None:
+            print("  [警告] PID=%s 对应进程不存在（进程已退出 / 服务不在运行 / 查询失败）"
+                  % pid_from_file)
+        else:
+            proc_pid = proc.get("pid")
+            proc_exe = proc.get("exe")
+            proc_cmd = proc.get("cmd")
+            print("  PID 文件对应进程信息：")
+            print("    PID=%-6s EXE=%s" % (proc_pid, proc_exe))
+            print("            CMD=%s" % proc_cmd)
+            pid_ok = (proc_pid is not None and int(proc_pid) == pid_from_file)
+            exe_ok = bool(proc_exe)            # ExecutablePath 可读取且非空
+            cmd_ok = bool(proc_cmd)            # CommandLine 可读取且非空
+            if cmd_ok:
+                cmd_l = proc_cmd.replace("\\", "/").lower()
+                root_l = str(PROJECT_ROOT).replace("\\", "/").lower()
+                cmd_points_here = ("qcos_server.py" in cmd_l) and (root_l in cmd_l)
+            if pid_ok and not (exe_ok and cmd_ok):
+                print("  [警告] 进程 ExecutablePath/CommandLine 无法读取（可能权限不足），"
+                      "无法确认身份")
+    else:
+        print("  [警告] 无有效 PID 文件，无法核对运行进程")
+
+    # 严格一致性判定
+    pid_matches = bool(pid_ok and exe_ok and cmd_ok and cmd_points_here)
     print("  → PID 文件与实际进程一致？    %s" % ("YES" if pid_matches else "NO"))
-    print("  → 进程 CommandLine 指向本项目的 qcos_server.py？ %s" % ("YES" if cmd_points_here else "NO"))
+    print("  → 进程 CommandLine 指向本项目的 qcos_server.py？ %s"
+          % ("YES" if cmd_points_here else "NO"))
 
     # ---- 3. 只读打开数据库 ----
     print("\n[3] 以只读方式打开数据库")
@@ -248,6 +275,7 @@ def main():
     if "sort_order" in mcols:
         msel += ", sort_order"
     machines = conn.execute("SELECT %s FROM machines ORDER BY id" % msel).fetchall()
+    machines = [row_to_dict(r) for r in machines]
     machine_map = {}
     for r in machines:
         machine_map[r["id"]] = r["name"]
@@ -264,6 +292,7 @@ def main():
     if not active:
         active = conn.execute(
             "SELECT * FROM sessions WHERE end_time IS NULL AND (is_voided IS NULL OR is_voided=0)").fetchall()
+    active = [row_to_dict(r) for r in active]
     print("  进行中桌局数 =", len(active))
     for s in active:
         sid = s["id"]
@@ -304,6 +333,7 @@ def main():
             "SELECT p.id, p.amount, p.method, p.status, NULL AS created_at, sp.session_id "
             "FROM payments p LEFT JOIN session_players sp ON p.session_player_id = sp.id "
             "ORDER BY p.id DESC LIMIT 10").fetchall()
+    pay_rows = [row_to_dict(r) for r in pay_rows]
     print("  笔数 =", len(pay_rows))
     for p in pay_rows:
         sid = p["session_id"]
