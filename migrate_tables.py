@@ -2,7 +2,8 @@
 
 用途：将 machines 表按 config.MACHINES 定义同步（改名 + 新增第5张桌 + 加 area/active 列）。
 - 先调用 backup_qcos 做带时间戳安全备份（SQLite Online Backup，含完整性校验）
-- 再运行 models.init_db()（内含幂等迁移：按稳定 id UPDATE/INSERT，绝不删除重建）
+- 再运行 models.init_db() 仅确保 schema 就绪（init_db 不再自动迁移 machines）
+- 随后显式调用 apply_machine_migration() 执行幂等迁移（按稳定 id UPDATE/INSERT，绝不删除重建）
 - 打印迁移前后 machines 快照并断言关键不变量
 - 可重复执行（幂等）
 
@@ -38,14 +39,20 @@ def main():
         print("MIGRATE_ABORTED: 备份失败:", e)
         return 1
 
-    # 2) 幂等迁移（init_db 内含 apply_machine_migration）
+    # 2) 先确保 schema 就绪（init_db 不再自动迁移 machines）
+    models.init_db()
+
+    # 2b) 显式执行桌台迁移（已先备份）：按稳定 id UPDATE/INSERT，绝不删除重建
+    db = models.get_db()
     try:
-        models.init_db()
+        models.apply_machine_migration(db)
         print("MIGRATE_OK")
     except Exception as e:
         print("MIGRATE_FAILED:", e)
         print("ROLLBACK: 用", backup_path, "覆盖", db_path)
         return 1
+    finally:
+        db.close()
 
     # 3) 校验关键不变量
     import sqlite3

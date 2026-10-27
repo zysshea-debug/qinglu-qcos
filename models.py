@@ -972,9 +972,10 @@ def init_db():
         )'''
     )
 
-    # 桌台治理 (P0 2026-10)：按稳定 id 同步 machines 到 config 定义
-    # 仅更新展示字段 / 新增缺失 id，绝不删除重建、不改运行时 status
-    apply_machine_migration(db)
+    # 生产安全：init_db 绝不自动执行桌台迁移。
+    # 桌台变更（改名 / 新增第5张桌 / 加 area·active 列）仅由 migrate_tables.py
+    # 在「先带时间戳备份 → 完整性校验」之后显式调用 apply_machine_migration 完成；
+    # 普通启动 / 重启 QCOS 不会修改现有桌台配置，保证生产数据不被静默改动。
 
     # 插入默认设置
     for key, value in DEFAULT_SETTINGS.items():
