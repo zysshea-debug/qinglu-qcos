@@ -1304,6 +1304,21 @@ def api_player_checkout(session_id, sp_id):
     # 奖励金抵扣后的实际应付（台费部分），商品仍全额计入
     grand_total = round(final_fee - reward_deduct + product_total, 2)
 
+    # 实收与备注（结算对账）：应收 = grand_total；实收可不同于应收；
+    # 实收≠应收时后端强制要求备注，不能只靠界面提示。
+    expected_amount = grand_total
+    actual_amount = data.get('actual_amount')
+    if actual_amount is None:
+        actual_amount = expected_amount
+    try:
+        actual_amount = round(float(actual_amount), 2)
+    except (TypeError, ValueError):
+        actual_amount = expected_amount
+    note = (data.get('note') or '').strip()
+    if abs(actual_amount - expected_amount) > 0.01 and not note:
+        return jsonify({'error': '应收与实收不一致，必须填写备注说明'}), 400
+    difference = round(actual_amount - expected_amount, 2)
+
     # 支付确认门禁：扫码收款且已配置支付通道时，必须确认到账才能结账
     provider = payment_module.get_provider()
     is_scan = payment_method in ('scan_wechat', 'scan_alipay')
@@ -1314,8 +1329,8 @@ def api_player_checkout(session_id, sp_id):
         pay = db.execute('SELECT * FROM payments WHERE out_trade_no=?', [payment_ref]).fetchone()
         if not pay or pay['status'] != 'SUCCESS':
             return jsonify({'error': '支付未确认成功，不能结账'}), 400
-        if abs((pay['amount'] or 0) - grand_total) > 0.01:
-            return jsonify({'error': '支付金额与结账金额不一致，不能结账'}), 400
+        if abs((pay['amount'] or 0) - actual_amount) > 0.01:
+            return jsonify({'error': '支付金额与实收金额不一致，不能结账'}), 400
         db.execute('UPDATE payments SET session_player_id=? WHERE out_trade_no=?', [sp_id, payment_ref])
 
     # 会员扣款（资金安全：必须二次校验会员真正属于当前玩家，禁止伪造跨会员扣款）
@@ -1328,11 +1343,11 @@ def api_player_checkout(session_id, sp_id):
         ).fetchone()
         if not member:
             return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
-        if member['balance'] < grand_total:
-            return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{grand_total:.2f})'}), 400
+        if member['balance'] < actual_amount:
+            return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{actual_amount:.2f})'}), 400
         db.execute(
             'UPDATE members SET balance = balance - ?, total_spent = total_spent + ?, updated_at = ? WHERE id = ?',
-            [grand_total, grand_total, datetime.now().isoformat(), member_id]
+            [actual_amount, actual_amount, datetime.now().isoformat(), member_id]
         )
 
     duration_minutes = round((end_time - start_time).total_seconds() / 60)
@@ -1346,14 +1361,15 @@ def api_player_checkout(session_id, sp_id):
         '''UPDATE session_players SET start_time=?, is_overnight=?, end_time=?, duration_minutes=?, fee=?, fee_breakdown=?,
            manual_discount_type=?, manual_discount_value=?, manual_discount_amount=?,
            discount_type=?, discount_id=?, discount_amount=?, final_fee=?,
-           product_total=?, grand_total=?, reward_deduct=?, payment_method=?, status="checked_out",
+           product_total=?, grand_total=?, reward_deduct=?, actual_amount=?, difference=?, note=?,
+           payment_method=?, status="checked_out",
            business_date=?, paid_at=?, operator=? WHERE id=?''',
         [start_time.isoformat(), 1 if effective_is_overnight else 0, end_time.isoformat(), duration_minutes, fee,
          json.dumps(breakdown, ensure_ascii=False),
          manual_discount_type, manual_discount_value, manual_discount_amount,
          discount_type, discount_id, discount_amount, final_fee,
-             product_total, grand_total, reward_deduct, payment_method,
-             sp_biz_dt, sp_paid_at, g.user['name'], sp_id]
+         product_total, grand_total, reward_deduct, actual_amount, difference, note, payment_method,
+         sp_biz_dt, sp_paid_at, g.user['name'], sp_id]
     )
 
     # 标记优惠券已用
@@ -1392,6 +1408,10 @@ def api_player_checkout(session_id, sp_id):
         'grand_total': grand_total,
         'reward_deduct': reward_deduct,
         'reward_balance_after': reward_balance_after,
+        'expected_amount': expected_amount,
+        'actual_amount': actual_amount,
+        'difference': difference,
+        'note': note,
         'payment_method': payment_method,
         'session_closed': remaining == 0,
         'member_balance_after': db.execute('SELECT balance FROM members WHERE id=?', [member_id]).fetchone()['balance'] if (payment_method == 'member' and member_id) else None
@@ -1649,6 +1669,182 @@ def api_reward_redemptions():
         'SELECT * FROM reward_redemptions WHERE member_id=? ORDER BY id DESC', [member_id]
     ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+@app.route('/api/sessions/<int:session_id>/table-checkout', methods=['POST'])
+@role_required('dashboard')
+def api_table_checkout(session_id):
+    """整桌结账：输入约定整桌台费，系统自动汇总全桌未结商品，应收 = 约定台费 + 未结商品。
+    一次结清整桌：写入唯一整桌结算记录、标记未结玩家为 table_settled（保留各自台费计算与商品归属，
+    grand_total 置 0 以免营业额重复计入）、结清全桌未结商品、关闭桌局。
+    已在事务内完成，任一步失败全部回滚。
+    """
+    data = request.json
+    db = g.db
+    settings = get_all_settings(db)
+
+    sess = db.execute('SELECT * FROM sessions WHERE id=?', [session_id]).fetchone()
+    if sess is not None:
+        sess = dict(sess)
+    if not sess:
+        return jsonify({'error': '会话不存在'}), 404
+    if sess['status'] != 'active':
+        return jsonify({'error': '该桌已关闭或不存在，不能整桌结账'}), 400
+
+    machine = db.execute('SELECT * FROM machines WHERE id=?', [sess['machine_id']]).fetchone()
+
+    # 通宵桌自动截止后、未确认实际结束时间 -> 结账前必须先确认/调整
+    if sess.get('auto_ended') and not sess.get('end_time_confirmed') and not sess.get('actual_end_time'):
+        if not data.get('auto_end_confirmed'):
+            return jsonify({
+                'error': 'NEEDS_END_TIME_CONFIRMATION',
+                'message': '该通宵桌已自动截止，请先确认实际结束时间后再结账。',
+                'auto_end_at': sess.get('auto_end_at'),
+            }), 409
+
+    # 仅汇总当前仍未结算的玩家与商品；已单独结账的不能再次计入
+    unsettled_players = db.execute(
+        'SELECT * FROM session_players WHERE session_id=? AND status="playing"', [session_id]
+    ).fetchall()
+    if not unsettled_players:
+        return jsonify({'error': '该桌已无未结账玩家，不能重复整桌结账'}), 400
+
+    # 约定整桌台费
+    try:
+        agreed_table_fee = round(float(data.get('agreed_table_fee')), 2)
+    except (TypeError, ValueError):
+        return jsonify({'error': '请输入有效的整桌台费'}), 400
+    if agreed_table_fee < 0:
+        return jsonify({'error': '整桌台费不能为负'}), 400
+
+    # 全桌未结商品合计（以系统计算为准，防止前端篡改）
+    product_total = round(float(db.execute(
+        'SELECT COALESCE(SUM(total),0) t FROM product_sales WHERE session_id=? AND status="UNSETTLED"',
+        [session_id]
+    ).fetchone()['t'] or 0), 2)
+
+    expected_amount = round(agreed_table_fee + product_total, 2)
+
+    actual_amount = data.get('actual_amount')
+    if actual_amount is None:
+        actual_amount = expected_amount
+    try:
+        actual_amount = round(float(actual_amount), 2)
+    except (TypeError, ValueError):
+        actual_amount = expected_amount
+
+    payment_method = data.get('payment_method')
+    note = (data.get('note') or '').strip()
+    if abs(actual_amount - expected_amount) > 0.01 and not note:
+        return jsonify({'error': '应收与实收不一致，必须填写备注说明'}), 400
+    difference = round(actual_amount - expected_amount, 2)
+    payer_name = (data.get('payer_name') or '').strip()
+    operator = (g.user or {}).get('name') or 'admin'
+
+    # 扫码支付门禁：确认金额必须等于实收
+    provider = payment_module.get_provider()
+    is_scan = payment_method in ('scan_wechat', 'scan_alipay')
+    if provider and is_scan:
+        payment_ref = data.get('payment_ref')
+        if not payment_ref:
+            return jsonify({'error': '未确认支付到账，不能结账（请先扫码并完成系统确认）'}), 400
+        pay = db.execute('SELECT * FROM payments WHERE out_trade_no=?', [payment_ref]).fetchone()
+        if not pay or pay['status'] != 'SUCCESS':
+            return jsonify({'error': '支付未确认成功，不能结账'}), 400
+        if abs((pay['amount'] or 0) - actual_amount) > 0.01:
+            return jsonify({'error': '支付金额与实收金额不一致，不能结账'}), 400
+        # 整桌一笔支付关联到各未结玩家（系统按人记录支付通道，但实为整桌一笔）
+        for p in unsettled_players:
+            db.execute(
+                'UPDATE payments SET session_player_id=? WHERE out_trade_no=? AND (session_player_id IS NULL OR session_player_id=0)',
+                [p['id'], payment_ref]
+            )
+
+    # 会员扣款（整桌付款人，必须属于本桌未结玩家，禁止伪造跨会员扣款）
+    member_id = data.get('member_id')
+    if payment_method == 'member':
+        if not member_id:
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
+        valid = any(dict(p).get('player_id') == member_id for p in unsettled_players)
+        member = db.execute("SELECT * FROM members WHERE id=? AND status='active'", [member_id]).fetchone()
+        if not member or not valid:
+            return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
+        if member['balance'] < actual_amount:
+            return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{actual_amount:.2f})'}), 400
+        db.execute(
+            'UPDATE members SET balance=balance-?, total_spent=total_spent+?, updated_at=? WHERE id=?',
+            [actual_amount, actual_amount, datetime.now().isoformat(), member_id]
+        )
+
+    # 整桌统一结束时间
+    end_time = overnight.effective_end_time(dict(sess))
+    now_iso = datetime.now().isoformat()
+    # V1.6 统一口径：真实实收按支付/结账时间归属营业日；台费部分写入 sessions.final_fee，
+    # 使整桌结算经 revenue 统一收银流水视图只计一次（grand_total = final_fee + 本桌商品）。
+    ts_biz_dt = revenue.business_date_for(end_time)
+    ts_paid_at = revenue.shanghai_now().isoformat(timespec='seconds')
+    ts_table_fee = round(actual_amount - product_total, 2)
+
+    try:
+        # 1) 整桌结算记录（唯一不可变结算事实）
+        db.execute(
+            '''INSERT INTO table_settlements (session_id, machine_id, agreed_table_fee, product_total,
+               expected_amount, actual_amount, difference, payment_method, note, payer_name, operator, settled_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+            [session_id, sess['machine_id'], agreed_table_fee, product_total, expected_amount,
+             actual_amount, difference, payment_method, note, payer_name, operator, now_iso]
+        )
+        settlement_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+        # 2) 未结玩家 -> table_settled：保留各自台费计算(fee/final_fee)与商品归属，
+        #    grand_total 置 0，避免营业额被按人重复计入（整桌实收仅由 sessions.final_fee 计入一次）
+        for p in unsettled_players:
+            p = dict(p)
+            pid = p['id']
+            start_time_str = p.get('start_time') or sess['start_time']
+            try:
+                st = datetime.fromisoformat(start_time_str)
+            except (ValueError, TypeError):
+                st = datetime.fromisoformat(sess['start_time'])
+            is_overnight = bool(sess.get('is_overnight')) or bool(p.get('is_overnight'))
+            fee, _ = calculate_fee(machine['type'], st, end_time, settings, is_overnight=is_overnight)
+            db.execute(
+                'UPDATE session_players SET status="table_settled", fee=?, final_fee=?, grand_total=0, '
+                'actual_amount=?, difference=?, note=?, payment_method=?, business_date=?, paid_at=?, operator=? WHERE id=?',
+                [fee, fee, actual_amount, difference, note, payment_method, ts_biz_dt, ts_paid_at, operator, pid]
+            )
+
+        # 3) 结清全桌未结商品（保留各自玩家归属明细）
+        db.execute(
+            "UPDATE product_sales SET status='SETTLED', settled_at=?, payment_method=?, member_id=?, business_date=? "
+            "WHERE session_id=? AND status='UNSETTLED'",
+            [now_iso, payment_method, member_id, ts_biz_dt, session_id]
+        )
+
+        # 4) 关闭桌局、释放台桌；sessions.final_fee 记台费实收部分，使 revenue 视图按其归属日只计一次
+        db.execute(
+            'UPDATE sessions SET end_time=?, status="closed", actual_end_time=?, end_time_confirmed=1, '
+            'fee=?, final_fee=?, payment_method=?, business_date=?, paid_at=?, operator=? WHERE id=?',
+            [end_time.isoformat(), end_time.isoformat(), agreed_table_fee, ts_table_fee, payment_method,
+             ts_biz_dt, ts_paid_at, operator, session_id]
+        )
+        db.execute('UPDATE machines SET status="idle" WHERE id=?', [sess['machine_id']])
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': '整桌结账失败：' + str(e)}), 500
+
+    return jsonify({
+        'settlement_id': settlement_id,
+        'agreed_table_fee': agreed_table_fee,
+        'product_total': product_total,
+        'expected_amount': expected_amount,
+        'actual_amount': actual_amount,
+        'difference': difference,
+        'note': note,
+        'payment_method': payment_method,
+        'session_closed': True,
+    })
 
 
 # ===== API: 商品 =====
@@ -2409,68 +2605,128 @@ def api_daily():
     session_list = []
     for s in sessions:
         s = dict(s)
-        # 从 session_players 聚合费用
         players = db.execute(
             'SELECT * FROM session_players WHERE session_id=? ORDER BY id', [s['id']]
         ).fetchall()
         players = [dict(p) for p in players]
 
-        # 兼容旧数据：如果 session_players 没有 fee 数据，用 session 级别数据
-        has_player_fee = any(p.get('fee') is not None for p in players)
+        # 整桌结账分支：存在整桌结算记录时按整桌口径汇总（仅计一次，商品由 product_sales 单独计，避免双计）
+        ts = db.execute(
+            'SELECT * FROM table_settlements WHERE session_id=? ORDER BY id DESC LIMIT 1', [s['id']]
+        ).fetchone()
+        is_table_settled = ts is not None
 
-        if has_player_fee:
-            s_fee = sum(p.get('fee', 0) or 0 for p in players)
-            s_lottery_discount = sum(p.get('discount_amount', 0) or 0 for p in players)
-            s_manual_discount = sum(p.get('manual_discount_amount', 0) or 0 for p in players)
-            s_discount = s_lottery_discount + s_manual_discount
-            s_revenue = sum(p.get('grand_total', 0) or p.get('final_fee', 0) or 0 for p in players)
-            for p in players:
-                pm = p.get('payment_method')
-                if pm and pm in payment_breakdown:
-                    payment_breakdown[pm] += p.get('grand_total', 0) or p.get('final_fee', 0) or 0
+        if is_table_settled:
+            ts = dict(ts)
+            s_fee = ts['agreed_table_fee']                                   # 应收台费 = 约定整桌台费
+            s_product_total = ts['product_total'] or 0
+            s_revenue = round((ts['actual_amount'] or 0) - s_product_total, 2)  # 台费实收 = 实收合计 - 商品（避免与商品双计）
+            s_discount = round(max(s_fee - s_revenue, 0), 2)
+            s_manual_discount = 0.0
+            s_expected = ts['expected_amount']                              # 应收合计 = 约定台费 + 商品
+            s_actual = ts['actual_amount']                                  # 实收合计
+            s_difference = ts['difference']
+            s_note = ts['note'] or ''
+            s_payer = ts['payer_name'] or ''
+            s_payment_method = ts['payment_method']
+            if s_payment_method and s_payment_method in payment_breakdown:
+                payment_breakdown[s_payment_method] += s_revenue
         else:
-            s_fee = s.get('fee', 0) or 0
-            s_discount = s.get('discount_amount', 0) or 0
-            s_manual_discount = 0
-            s_revenue = s.get('final_fee', 0) or 0
-            pm = s.get('payment_method')
-            if pm and pm in payment_breakdown:
-                payment_breakdown[pm] += s_revenue
+            # 兼容旧数据：如果 session_players 没有 fee 数据，用 session 级别数据
+            has_player_fee = any(p.get('fee') is not None for p in players)
+
+            if has_player_fee:
+                s_fee = sum(p.get('fee', 0) or 0 for p in players)
+                s_lottery_discount = sum(p.get('discount_amount', 0) or 0 for p in players)
+                s_manual_discount = sum(p.get('manual_discount_amount', 0) or 0 for p in players)
+                s_discount = s_lottery_discount + s_manual_discount
+                s_revenue = sum(p.get('grand_total', 0) or p.get('final_fee', 0) or 0 for p in players)
+                for p in players:
+                    pm = p.get('payment_method')
+                    if pm and pm in payment_breakdown:
+                        payment_breakdown[pm] += p.get('grand_total', 0) or p.get('final_fee', 0) or 0
+                # 应收/实收/差额（逐人结账按各自实收汇总，备注在 players_detail 各自展示）
+                s_expected = sum((p.get('grand_total', 0) or 0) for p in players)
+                s_actual = sum(
+                    ((p.get('actual_amount') if p.get('actual_amount') is not None else (p.get('grand_total', 0) or 0))
+                     for p in players)
+                )
+                s_difference = round(s_actual - s_expected, 2)
+                # 逐人备注聚合到桌级（多玩家以 ； 连接，便于日报/导出展示）
+                _notes = [p.get('note') or '' for p in players if (p.get('note') or '').strip()]
+                s_note = '；'.join(_notes)
+                s_payer = ''
+            else:
+                s_fee = s.get('fee', 0) or 0
+                s_discount = s.get('discount_amount', 0) or 0
+                s_manual_discount = 0
+                s_revenue = s.get('final_fee', 0) or 0
+                s_expected = s_revenue
+                s_actual = s_revenue
+                s_difference = 0
+                s_note = ''
+                s_payer = ''
 
         total_fee += s_fee
         total_discount += s_discount
         total_manual_discount += s_manual_discount
         total_revenue += s_revenue
 
+        # 各玩家商品归属（保留原玩家归属明细）
+        prod_by_player = {
+            r['session_player_id']: (r['t'] or 0)
+            for r in db.execute(
+                'SELECT session_player_id, COALESCE(SUM(total),0) t FROM product_sales WHERE session_id=? GROUP BY session_player_id',
+                [s['id']]
+            ).fetchall()
+        }
+
         s['fee'] = round(s_fee, 2)
         s['discount_amount'] = round(s_discount, 2)
         s['final_fee'] = round(s_revenue, 2)
         s['players_str'] = ', '.join(p['player_name'] for p in players)
         s['player_count'] = len(players)
-        if has_player_fee:
-            s['players_detail'] = [{
-                'name': p['player_name'],
-                'fee': p.get('fee', 0),
-                'manual_discount': p.get('manual_discount_amount', 0),
-                'discount': p.get('discount_amount', 0),
-                'final_fee': p.get('final_fee', 0),
-                'product_total': p.get('product_total', 0),
-                'grand_total': p.get('grand_total', 0),
-                'payment_method': p.get('payment_method'),
-                'payment_label': PAYMENT_METHODS.get(p.get('payment_method'), ''),
-                'duration': p.get('duration_minutes', 0),
-                'status': p.get('status', ''),
-            } for p in players]
-        else:
-            s['players_detail'] = []
-            s['payment_label'] = PAYMENT_METHODS.get(s.get('payment_method'), '')
+
+        # 应收/实收/差额/备注（对账展示）
+        s['settlement_type'] = 'table' if is_table_settled else 'player'
+        s['expected_amount'] = round(s_expected, 2)
+        s['actual_amount'] = round(s_actual, 2)
+        s['difference'] = round(s_difference, 2)
+        s['note'] = s_note
+        s['payer_name'] = s_payer
+        if is_table_settled:
+            s['agreed_table_fee'] = round(ts['agreed_table_fee'], 2)
+            s['table_settlement_id'] = ts['id']
+
+        # 玩家明细（含逐人实收/差额/备注；整桌结算保留各自台费计算与商品归属，不再按人重复计入）
+        s['players_detail'] = [{
+            'name': p['player_name'],
+            'fee': p.get('fee', 0),
+            'manual_discount': p.get('manual_discount_amount', 0),
+            'discount': p.get('discount_amount', 0),
+            'final_fee': p.get('final_fee', 0),
+            'product_total': prod_by_player.get(p['id'], 0),
+            'grand_total': p.get('grand_total', 0) if not is_table_settled else 0,
+            'expected_amount': (p.get('grand_total', 0) or p.get('final_fee', 0) or 0) if not is_table_settled else (p.get('final_fee', 0) or 0),
+            'actual_amount': (p.get('actual_amount') if p.get('actual_amount') is not None else (p.get('grand_total', 0) or p.get('final_fee', 0) or 0)) if not is_table_settled else 0,
+            'difference': p.get('difference', 0) if not is_table_settled else 0,
+            'note': p.get('note') or '' if not is_table_settled else (s_note or ''),
+            'payment_method': p.get('payment_method') if not is_table_settled else s_payment_method,
+            'payment_label': PAYMENT_METHODS.get(p.get('payment_method') if not is_table_settled else s_payment_method, ''),
+            'duration': p.get('duration_minutes', 0),
+            'status': p.get('status', ''),
+        } for p in players]
+        if not players:
+            s['payment_label'] = PAYMENT_METHODS.get(s.get('payment_method'), '') if not is_table_settled else PAYMENT_METHODS.get(s_payment_method, '')
 
         # 商品总额
         ps = db.execute('SELECT SUM(total) as total FROM product_sales WHERE session_id=?', [s['id']]).fetchone()
         s['product_total'] = ps['total'] or 0
 
         s['type_label'] = MACHINE_TYPE_LABELS.get(s['machine_type'], s['machine_type'])
-        s['payment_label'] = ', '.join(set(PAYMENT_METHODS.get(p.get('payment_method'), '') for p in players if p.get('payment_method')))
+        s['payment_label'] = ', '.join(set(PAYMENT_METHODS.get(p.get('payment_method'), '') for p in players if p.get('payment_method'))) or (
+            PAYMENT_METHODS.get(s_payment_method, '') if is_table_settled else PAYMENT_METHODS.get(s.get('payment_method'), '')
+        )
         session_list.append(s)
 
     active_count = db.execute(
@@ -2538,14 +2794,17 @@ def api_export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['序号', '日期', '星期', '桌号', '机型', '开始时间', '结束时间',
-                     '时长(分钟)', '台费', '抵扣', '实收', '支付方式', '商品消费', '玩家', '组织者'])
+                     '时长(分钟)', '台费', '抵扣', '实收(台费)', '支付方式', '商品消费',
+                     '应收合计', '实收合计', '差额', '备注', '付款人', '结算方式', '玩家', '组织者'])
 
     weekdays = ['一', '二', '三', '四', '五', '六', '日']
 
     for i, s in enumerate(sessions, 1):
+        s = dict(s)
         players = db.execute(
-            'SELECT player_name, is_organizer FROM session_players WHERE session_id=?', [s['id']]
+            'SELECT * FROM session_players WHERE session_id=? ORDER BY id', [s['id']]
         ).fetchall()
+        players = [dict(p) for p in players]
         player_names = [p['player_name'] for p in players]
         organizers = [p['player_name'] for p in players if p['is_organizer']]
 
@@ -2554,6 +2813,51 @@ def api_export_csv():
 
         ps = db.execute('SELECT SUM(total) as total FROM product_sales WHERE session_id=?', [s['id']]).fetchone()
         product_total = ps['total'] or 0
+
+        # 整桌结账：存在整桌结算记录时按整桌口径（仅计一次，商品由 product_sales 单独计，避免双计）
+        ts = db.execute(
+            'SELECT * FROM table_settlements WHERE session_id=? ORDER BY id DESC LIMIT 1', [s['id']]
+        ).fetchone()
+        if ts is not None:
+            ts = dict(ts)
+            fee_part = ts['agreed_table_fee']
+            fee_actual = round((ts['actual_amount'] or 0) - (ts['product_total'] or 0), 2)
+            discount = round(max(fee_part - fee_actual, 0), 2)
+            expected_total = ts['expected_amount']
+            actual_total = ts['actual_amount']
+            difference = ts['difference']
+            note = ts['note'] or ''
+            payer = ts['payer_name'] or ''
+            payment_method = ts['payment_method']
+            settlement_type = '整桌'
+            product_total = ts['product_total'] or 0
+        else:
+            has_player_fee = any(p.get('fee') is not None for p in players)
+            if has_player_fee:
+                fee_part = sum(p.get('fee', 0) or 0 for p in players)
+                discount = sum(
+                    (p.get('discount_amount', 0) or 0) + (p.get('manual_discount_amount', 0) or 0) for p in players
+                )
+                fee_actual = sum((p.get('grand_total', 0) or 0) for p in players)
+                expected_total = sum((p.get('grand_total', 0) or 0) for p in players)
+                actual_total = sum(
+                    ((p.get('actual_amount') if p.get('actual_amount') is not None else (p.get('grand_total', 0) or 0))
+                     for p in players)
+                )
+                difference = round(actual_total - expected_total, 2)
+            else:
+                fee_part = s.get('fee', 0) or 0
+                discount = s.get('discount_amount', 0) or 0
+                fee_actual = s.get('final_fee', 0) or 0
+                expected_total = fee_actual
+                actual_total = fee_actual
+                difference = 0
+            # 逐人备注聚合到桌级（多玩家以 ； 连接）
+            _notes = [p.get('note') or '' for p in players if (p.get('note') or '').strip()]
+            note = '；'.join(_notes)
+            payer = ''
+            payment_method = s.get('payment_method')
+            settlement_type = '逐人'
 
         writer.writerow([
             i,
@@ -2564,11 +2868,17 @@ def api_export_csv():
             start_dt.strftime('%H:%M'),
             end_dt.strftime('%H:%M'),
             s['duration_minutes'],
-            s['fee'],
-            s['discount_amount'],
-            s['final_fee'],
-            PAYMENT_METHODS.get(s['payment_method'], ''),
-            product_total,
+            round(fee_part, 2),
+            round(discount, 2),
+            round(fee_actual, 2),
+            PAYMENT_METHODS.get(payment_method, ''),
+            round(product_total, 2),
+            round(expected_total, 2),
+            round(actual_total, 2),
+            round(difference, 2),
+            note,
+            payer,
+            settlement_type,
             ', '.join(player_names),
             ', '.join(organizers)
         ])

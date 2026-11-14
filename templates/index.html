@@ -231,11 +231,99 @@
                     </div>
                     <span class="amount" id="checkoutFinalAmount">¥0</span>
                 </div>
+
+                <!-- 实收与备注（结算对账）：实收可不同于应收，差額需备注 -->
+                <div class="row mt-3 g-2 align-items-end">
+                    <div class="col-6">
+                        <label class="form-label fw-bold mb-1">实收金额 <small class="text-muted">(可不同于应收)</small></label>
+                        <input type="number" class="form-control" id="checkoutActualAmount" placeholder="0" min="0" step="0.01" oninput="onActualAmountChange()">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label fw-bold mb-1">差额</label>
+                        <span class="fw-bold text-muted" id="checkoutDifference">¥0.00</span>
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <label class="form-label fw-bold mb-1">备注 <span id="noteRequiredHint" class="text-danger" style="display:none">(应收≠实收，必填)</span></label>
+                    <textarea class="form-control" id="checkoutNote" rows="2" placeholder="如抹零、优惠、收款差异等说明"></textarea>
+                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-danger btn-lg" onclick="confirmPlayerCheckout()">
                     <i class="bi bi-check-circle"></i> 确认结账
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 整桌结账弹窗 -->
+<div class="modal fade" id="tableCheckoutModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title">整桌结账 - <span id="tableCheckoutMachineName"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-light border">
+                    整桌结账将一次性结清本桌所有未结账玩家与未结算商品，并关闭台桌。请先与顾客确认约定整桌台费（系统会自动汇总全桌未结商品，防止篡改）。
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <label class="form-label fw-bold">约定整桌台费 <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control" id="tableAgreedFee" placeholder="0" min="0" step="0.01" oninput="onTableActualAmountChange()">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label fw-bold">全桌未结商品合计</label>
+                        <div class="form-control-plaintext fs-5" id="tableUnsettledProductTotal">¥0.00</div>
+                    </div>
+                </div>
+                <div class="row g-2 mb-3 align-items-end">
+                    <div class="col-4">
+                        <label class="form-label fw-bold">应收合计</label>
+                        <div class="form-control-plaintext fw-bold" id="tableExpectedAmount">¥0.00</div>
+                    </div>
+                    <div class="col-4">
+                        <label class="form-label fw-bold">实收金额</label>
+                        <input type="number" class="form-control" id="tableActualAmount" placeholder="0" min="0" step="0.01" oninput="onTableActualAmountChange()">
+                    </div>
+                    <div class="col-4">
+                        <label class="form-label fw-bold">差额</label>
+                        <div class="fw-bold text-muted" id="tableDifference">¥0.00</div>
+                    </div>
+                </div>
+                <label class="form-label fw-bold">支付方式</label>
+                <div class="btn-group w-100 mb-3 flex-wrap" role="group">
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableScanWechat" value="scan_wechat" checked>
+                    <label class="btn btn-outline-primary" for="payTableScanWechat">微信扫码</label>
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableScanAlipay" value="scan_alipay">
+                    <label class="btn btn-outline-primary" for="payTableScanAlipay">支付宝扫码</label>
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableWechat" value="wechat">
+                    <label class="btn btn-outline-primary" for="payTableWechat">微信</label>
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableAlipay" value="alipay">
+                    <label class="btn btn-outline-primary" for="payTableAlipay">支付宝</label>
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableCash" value="cash">
+                    <label class="btn btn-outline-primary" for="payTableCash">现金</label>
+                    <input type="radio" class="btn-check" name="tablePaymentMethod" id="payTableMember" value="member">
+                    <label class="btn btn-outline-primary" for="payTableMember">会员余额</label>
+                </div>
+                <div class="row g-2 mb-2">
+                    <div class="col-6">
+                        <label class="form-label fw-bold">付款人</label>
+                        <input type="text" class="form-control" id="tablePayerName" placeholder="付款人姓名（可选）">
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <label class="form-label fw-bold mb-1">备注 <span id="tableNoteRequiredHint" class="text-danger" style="display:none">(应收≠实收，必填)</span></label>
+                    <textarea class="form-control" id="tableNote" rows="2" placeholder="如抹零、包桌优惠、收款差异等说明"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger btn-lg" onclick="confirmTableCheckout()">
+                    <i class="bi bi-check-circle"></i> 确认整桌结账
                 </button>
             </div>
         </div>

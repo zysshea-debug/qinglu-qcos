@@ -82,8 +82,8 @@ def _get_target(db):
 
 
 def _gmv_in_range(db, start, end):
-    """区间内 GMV = 台费实收(session_players.grand_total) + 商品销售(product_sales)。
-    口径与 /api/daily 保持一致（不含会员充值）。"""
+    """区间内 GMV = 台费实收(session_players.grand_total + 整桌结算台费部分) + 商品销售(product_sales)。
+    口径与 /api/daily / analytics._gmv_in_range 保持一致（不含会员充值）。"""
     sessions = db.execute(
         '''SELECT id FROM sessions WHERE status='closed'
            AND date(start_time) >= ? AND date(start_time) <= ?''',
@@ -102,7 +102,18 @@ def _gmv_in_range(db, start, end):
         'SELECT SUM(total) t FROM product_sales WHERE date(created_at) >= ? AND date(created_at) <= ?',
         [start, end]
     ).fetchone()['t'] or 0
-    return round(float(fee_total) + float(prod), 2)
+    # 整桌结算台费部分（按桌局 start_time 归属到日）
+    table_fee = 0.0
+    tables = [t['name'] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    if 'table_settlements' in tables:
+        tf = db.execute(
+            '''SELECT COALESCE(SUM(ts.actual_amount - ts.product_total), 0) t
+               FROM table_settlements ts JOIN sessions s ON ts.session_id = s.id
+               WHERE date(s.start_time) >= ? AND date(s.start_time) <= ?''',
+            [start, end]
+        ).fetchone()
+        table_fee = float(tf['t'] or 0)
+    return round(float(fee_total) + float(prod) + float(table_fee), 2)
 
 
 # ===================== 玩家价值评分模型 =====================

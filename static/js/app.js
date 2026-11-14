@@ -38,6 +38,13 @@ function escapeJs(str) {
     return String(str).replace(/[\\'"]/g, '\\$&').replace(/\n/g, '\\n').replace(/\r/g, '');
 }
 
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', () => {
     const page = document.body.dataset.page;
@@ -168,6 +175,9 @@ function renderActiveCard(m) {
         <div class="player-list">${playerRows}</div>
         ${activeCount > 0 ? `<button class="btn btn-outline-primary btn-sm w-100 mt-2" onclick="addPlayerToSession(${s.id}, '${m.name}')">
             <i class="bi bi-person-plus"></i> 加人
+        </button>` : ''}
+        ${activeCount > 0 ? `<button class="btn btn-warning btn-sm w-100 mt-1" onclick="openTableCheckout(${s.id})">
+            <i class="bi bi-collection"></i> 整桌结账
         </button>` : ''}
         ${confirmButtons}
         <button class="btn btn-outline-danger btn-sm w-100 mt-1" onclick="forceCloseSession(${s.id}, '${m.name}')">
@@ -1018,6 +1028,33 @@ function updateCheckoutTotal() {
     // 同步显示手动折扣金额
     const mdAmountEl = document.getElementById('manualDiscountAmount');
     if (mdAmountEl) mdAmountEl.textContent = manualDiscount > 0 ? `-${money(manualDiscount)}` : money(0);
+
+    // 实收默认跟随应收（仅在用户未手动改过时才自动同步）
+    const actualEl = document.getElementById('checkoutActualAmount');
+    if (actualEl) {
+        const cur = parseFloat(actualEl.value);
+        if (!actualEl.value || Math.abs(cur - (lastExpectedAmount || 0)) < 0.01) {
+            actualEl.value = grandTotal.toFixed(2);
+        }
+        onActualAmountChange();
+    }
+    lastExpectedAmount = grandTotal;
+}
+
+let lastExpectedAmount = 0;
+
+// 单人结账：实收与应收不一致时显示差额并要求备注
+function onActualAmountChange() {
+    const actualEl = document.getElementById('checkoutActualAmount');
+    const diffEl = document.getElementById('checkoutDifference');
+    const hint = document.getElementById('noteRequiredHint');
+    if (!actualEl || !diffEl) return;
+    const expected = parseFloat((document.getElementById('checkoutFinalAmount').textContent || '0').replace(/[^\d.-]/g, '')) || 0;
+    const actual = parseFloat(actualEl.value) || 0;
+    const diff = round(actual - expected);
+    diffEl.textContent = (diff >= 0 ? '+' : '') + money(diff);
+    diffEl.className = 'fw-bold ' + (Math.abs(diff) < 0.01 ? 'text-muted' : 'text-danger');
+    if (hint) hint.style.display = Math.abs(diff) > 0.01 ? 'inline' : 'none';
 }
 
 async function confirmPlayerCheckout() {
@@ -1096,6 +1133,17 @@ async function confirmPlayerCheckout() {
     const manualDiscountType = document.getElementById('manualDiscountType').value;
     const manualDiscountValue = parseFloat(document.getElementById('manualDiscountValue').value) || 0;
 
+    // 实收与备注（结算对账）：应收=台费+商品；实收可不同，差額需备注
+    const actualAmountEl = document.getElementById('checkoutActualAmount');
+    const actualAmount = (actualAmountEl && actualAmountEl.value !== '') ? parseFloat(actualAmountEl.value) : null;
+    const note = (document.getElementById('checkoutNote').value || '').trim();
+    const expected = parseFloat((document.getElementById('checkoutFinalAmount').textContent || '0').replace(/[^\d.-]/g, '')) || 0;
+    if (actualAmount !== null && Math.abs(actualAmount - expected) > 0.01 && !note) {
+        alert('应收与实收不一致，请填写备注说明');
+        document.getElementById('checkoutNote').focus();
+        return;
+    }
+
     try {
         const res = await fetch(`/api/sessions/${currentSessionId}/players/${currentSpId}/checkout`, {
             method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1108,12 +1156,21 @@ async function confirmPlayerCheckout() {
                 is_overnight: isOvernight,
                 manual_discount_type: manualDiscountType,
                 manual_discount_value: manualDiscountValue,
+                actual_amount: actualAmount,
+                note: note,
                 payment_ref: paymentConfirmEnabled ? paymentConfirmRef : null
             })
         });
         if (res.ok) {
             const result = await res.json();
-            let msg = `${checkoutData.player_name} 结账成功\n实收: ${money(result.grand_total || result.final_fee)}`;
+            let msg = `${checkoutData.player_name} 结账成功`;
+            if (result.expected_amount !== undefined && result.actual_amount !== undefined) {
+                msg += `\n应收: ${money(result.expected_amount)}\n实收: ${money(result.actual_amount)}`;
+                if (Math.abs(result.difference || 0) > 0.01) msg += `\n差额: ${money(result.difference)}`;
+            } else {
+                msg += `\n实收: ${money(result.grand_total || result.final_fee)}`;
+            }
+            if (result.note) msg += `\n备注: ${result.note}`;
             if (result.member_balance_after !== null && result.member_balance_after !== undefined) {
                 msg += `\n会员余额: ${money(result.member_balance_after)}`;
             }
@@ -1122,6 +1179,93 @@ async function confirmPlayerCheckout() {
             bootstrap.Modal.getInstance(document.getElementById('checkoutModal')).hide();
             fetchMachines();
         } else { const err = await res.json(); alert(err.error || '结账失败'); }
+    } catch (e) { alert('网络错误'); }
+}
+
+// ===== 整桌结账 =====
+function openTableCheckout(sessionId) {
+    currentSessionId = sessionId;
+    const m = (machines || []).find(x => x.session && x.session.id === sessionId);
+    const players = (m && m.session && m.session.players) || [];
+    const productTotal = players.reduce((s, p) => s + (p.unsettled_product_total || 0), 0);
+    document.getElementById('tableCheckoutMachineName').textContent = m ? m.name : '';
+    document.getElementById('tableUnsettledProductTotal').textContent = money(productTotal);
+    document.getElementById('tableAgreedFee').value = '';
+    document.getElementById('tableActualAmount').value = '';
+    document.getElementById('tableDifference').textContent = money(0);
+    document.getElementById('tableDifference').className = 'fw-bold text-muted';
+    document.getElementById('tablePayerName').value = '';
+    document.getElementById('tableNote').value = '';
+    document.getElementById('tableNoteRequiredHint').style.display = 'none';
+    const payWechat = document.getElementById('payTableScanWechat');
+    if (payWechat) payWechat.checked = true;
+    document.querySelectorAll('input[name="tablePaymentMethod"]').forEach(r => { r.onchange = onTableActualAmountChange; });
+    onTableActualAmountChange();
+    new bootstrap.Modal(document.getElementById('tableCheckoutModal')).show();
+}
+
+function onTableActualAmountChange() {
+    const agreed = parseFloat(document.getElementById('tableAgreedFee').value) || 0;
+    const product = parseFloat((document.getElementById('tableUnsettledProductTotal').textContent || '0').replace(/[^\d.-]/g, '')) || 0;
+    const expected = round(agreed + product);
+    document.getElementById('tableExpectedAmount').textContent = money(expected);
+    const actualEl = document.getElementById('tableActualAmount');
+    const actual = parseFloat(actualEl.value) || 0;
+    const diff = round(actual - expected);
+    const diffEl = document.getElementById('tableDifference');
+    diffEl.textContent = (diff >= 0 ? '+' : '') + money(diff);
+    diffEl.className = 'fw-bold ' + (Math.abs(diff) < 0.01 ? 'text-muted' : 'text-danger');
+    const hint = document.getElementById('tableNoteRequiredHint');
+    if (hint) hint.style.display = Math.abs(diff) > 0.01 ? 'inline' : 'none';
+}
+
+async function confirmTableCheckout() {
+    const paymentMethodEl = document.querySelector('input[name="tablePaymentMethod"]:checked');
+    if (!paymentMethodEl) { alert('请选择支付方式'); return; }
+    const paymentMethod = paymentMethodEl.value;
+    const agreed = parseFloat(document.getElementById('tableAgreedFee').value);
+    if (isNaN(agreed) || agreed < 0) { alert('请输入有效的整桌台费'); return; }
+    const product = parseFloat((document.getElementById('tableUnsettledProductTotal').textContent || '0').replace(/[^\d.-]/g, '')) || 0;
+    const expected = round(agreed + product);
+    const actualEl = document.getElementById('tableActualAmount');
+    let actual = (actualEl && actualEl.value !== '') ? parseFloat(actualEl.value) : expected;
+    if (isNaN(actual)) actual = expected;
+    const note = (document.getElementById('tableNote').value || '').trim();
+    const payerName = (document.getElementById('tablePayerName').value || '').trim();
+    if (Math.abs(actual - expected) > 0.01 && !note) {
+        alert('应收与实收不一致，请填写备注说明');
+        document.getElementById('tableNote').focus();
+        return;
+    }
+    try {
+        const res = await fetch(`/api/sessions/${currentSessionId}/table-checkout`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                agreed_table_fee: agreed,
+                actual_amount: actual,
+                payment_method: paymentMethod,
+                note: note,
+                payer_name: payerName,
+                payment_ref: null
+            })
+        });
+        if (res.ok) {
+            const r = await res.json();
+            let msg = `整桌结账成功\n应收: ${money(r.expected_amount)}\n实收: ${money(r.actual_amount)}`;
+            if (Math.abs(r.difference || 0) > 0.01) msg += `\n差额: ${money(r.difference)}`;
+            if (r.note) msg += `\n备注: ${r.note}`;
+            msg += '\n本桌已结算并关闭';
+            alert(msg);
+            bootstrap.Modal.getInstance(document.getElementById('tableCheckoutModal')).hide();
+            fetchMachines();
+        } else {
+            const err = await res.json().catch(() => ({}));
+            if (err.error === 'NEEDS_END_TIME_CONFIRMATION') {
+                alert(err.message || '请先确认通宵桌实际结束时间后再结账');
+            } else {
+                alert(err.error || '整桌结账失败');
+            }
+        }
     } catch (e) { alert('网络错误'); }
 }
 
@@ -1215,18 +1359,34 @@ function renderDailyReport(data) {
     if (scanWechat) scanWechat.textContent = money(s.payment_breakdown.scan_wechat || 0);
     if (scanAlipay) scanAlipay.textContent = money(s.payment_breakdown.scan_alipay || 0);
     const tbody = document.getElementById('dailySessions');
-    if (data.sessions.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">暂无记录</td></tr>'; return; }
-    tbody.innerHTML = data.sessions.map(s => `<tr>
-        <td>${formatTime(s.start_time)}</td>
-        <td>${s.machine_name}</td>
-        <td>${s.type_label}</td>
-        <td>${formatDuration(s.duration_minutes)}</td>
-        <td>${money(s.fee)}</td>
-        <td>${s.product_total > 0 ? money(s.product_total) : '-'}</td>
-        <td>${s.discount_amount > 0 ? '-' + money(s.discount_amount) : '-'}</td>
-        <td>${money(s.final_fee)}</td>
-        <td>${s.payment_label}</td>
-    </tr>`).join('');
+    if (data.sessions.length === 0) { tbody.innerHTML = '<tr><td colspan="13" class="text-center text-muted py-4">暂无记录</td></tr>'; return; }
+    tbody.innerHTML = data.sessions.map(s => {
+        const isTable = s.settlement_type === 'table';
+        const diff = s.difference || 0;
+        const diffHtml = Math.abs(diff) < 0.01 ? '-' : `<span class="text-danger">${money(diff)}</span>`;
+        const noteHtml = s.note ? `<span title="${escapeHtml(s.note)}">${escapeHtml(s.note.length > 8 ? s.note.slice(0, 8) + '…' : s.note)}</span>` : '-';
+        const settleBadge = isTable
+            ? `<span class="badge bg-warning text-dark">整桌${s.payer_name ? '·' + escapeHtml(s.payer_name) : ''}</span>`
+            : '<span class="badge bg-light text-dark">逐人</span>';
+        const machineCell = isTable
+            ? `${s.machine_name} ${settleBadge}`
+            : s.machine_name;
+        return `<tr>
+            <td>${formatTime(s.start_time)}</td>
+            <td>${machineCell}</td>
+            <td>${s.type_label}</td>
+            <td>${formatDuration(s.duration_minutes)}</td>
+            <td>${money(s.fee)}</td>
+            <td>${s.product_total > 0 ? money(s.product_total) : '-'}</td>
+            <td>${s.discount_amount > 0 ? '-' + money(s.discount_amount) : '-'}</td>
+            <td>${money(s.expected_amount)}</td>
+            <td>${money(s.actual_amount)}</td>
+            <td>${diffHtml}</td>
+            <td>${s.payment_label}</td>
+            <td>${noteHtml}</td>
+            <td>${settleBadge}</td>
+        </tr>`;
+    }).join('');
 }
 
 // ===== 系统设置 =====

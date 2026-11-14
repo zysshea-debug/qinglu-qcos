@@ -580,6 +580,16 @@ def init_db():
         if col_name not in col_names:
             db.execute(f'ALTER TABLE session_players ADD COLUMN {col_name} {col_type}')
 
+    # ===== 迁移：session_players 加实收/差额/备注字段（结算备注与应收实收对账）=====
+    sp_settle_note_cols = {
+        'actual_amount': 'REAL',
+        'difference': 'REAL DEFAULT 0',
+        'note': 'TEXT',
+    }
+    for col_name, col_type in sp_settle_note_cols.items():
+        if col_name not in col_names:
+            db.execute(f'ALTER TABLE session_players ADD COLUMN {col_name} {col_type}')
+
     # ===== 迁移：product_sales 支持无码商品 =====
     # SQLite 不能直接删除 NOT NULL，需要重建表
     ps_cols = db.execute('PRAGMA table_info(product_sales)').fetchall()
@@ -972,6 +982,29 @@ def init_db():
         )'''
     )
 
+    # ===== 整桌结账记录（单一不可变结算事实，用于营业额与对账展示）=====
+    # 整桌结账：约定整桌台费 + 本桌全部未结商品 = 应收；实收可与之不同（差额需备注）。
+    # 商品仍保留各自玩家归属（product_sales），此处仅记录整桌结算汇总与对账字段。
+    # 营业额口径：台费部分 = actual_amount - product_total（商品部分已由 product_sales 单独计入，避免重复）。
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS table_settlements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            machine_id INTEGER,
+            agreed_table_fee REAL NOT NULL,
+            product_total REAL DEFAULT 0,
+            expected_amount REAL NOT NULL,
+            actual_amount REAL NOT NULL,
+            difference REAL DEFAULT 0,
+            payment_method TEXT,
+            note TEXT,
+            payer_name TEXT,
+            operator TEXT,
+            settled_at TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id)
+        )'''
+    )
+
     # 生产安全：init_db 绝不自动执行桌台迁移。
     # 桌台变更（改名 / 新增第5张桌 / 加 area·active 列）仅由 migrate_tables.py
     # 在「先带时间戳备份 → 完整性校验」之后显式调用 apply_machine_migration 完成；
@@ -1024,3 +1057,38 @@ def update_setting(db, key, value):
         [key, str(value)]
     )
     db.commit()
+
+
+def table_settlement_fee_revenue_in_range(db, start, end):
+    """整桌结算的「台费实收部分」= SUM(actual_amount - product_total)，
+    按所属桌局 start_time 归属到日（与 sessions / product_sales 的日口径一致）。
+
+    商品部分已由 product_sales 单独计入营业额，这里只取台费部分，避免重复计入。
+    仅统计已存在的 table_settlements 表；若表不存在（极旧库）安全返回 0。
+    """
+    tables = [t['name'] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    if 'table_settlements' not in tables:
+        return 0.0
+    row = db.execute(
+        '''SELECT COALESCE(SUM(ts.actual_amount - ts.product_total), 0) t
+           FROM table_settlements ts JOIN sessions s ON ts.session_id = s.id
+           WHERE date(s.start_time) >= ? AND date(s.start_time) <= ?''',
+        [start, end]
+    ).fetchone()
+    return float(row['t'] or 0)
+
+
+def table_settlements_in_range(db, start, end):
+    """返回指定日期区间内（按桌局 start_time）的全部整桌结算记录，供日报/导出展示。"""
+    tables = [t['name'] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    if 'table_settlements' not in tables:
+        return []
+    return db.execute(
+        '''SELECT ts.*, s.start_time AS session_start_time, m.name AS machine_name
+           FROM table_settlements ts
+           JOIN sessions s ON ts.session_id = s.id
+           LEFT JOIN machines m ON ts.machine_id = m.id
+           WHERE date(s.start_time) >= ? AND date(s.start_time) <= ?
+           ORDER BY ts.id''',
+        [start, end]
+    ).fetchall()
