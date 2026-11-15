@@ -24,8 +24,34 @@ _tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
 config.DB_PATH = _tmp.name
 
 import models
+models.DB_PATH = _tmp.name  # pytest conftest 可能已提前绑定 models.DB_PATH，需同步
 models.init_db()
+
+# V1.6 起 init_db 不再自动插入台桌（生产安全）；测试库按 config.MACHINES 自行播种。
+def _seed_test_machines():
+    import sqlite3 as _sq
+    _db = _sq.connect(config.DB_PATH)
+    for m in config.MACHINES:
+        _db.execute(
+            'INSERT OR IGNORE INTO machines (id, name, type, status, sort_order) VALUES (?, ?, ?, "idle", ?)',
+            [m['id'], m['name'], m['type'], m['sort_order']]
+        )
+    _db.commit()
+    _db.close()
+
+
+_seed_test_machines()
 import app as APP
+
+# pytest 下 conftest 每测试重建空库（且 V1.6 init_db 不再播种台桌），需在每测试内再次播种。
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _seed_machines_per_test(_isolate_db_per_test):
+        _seed_test_machines()
+except ImportError:  # 脚本直跑 python tests/xxx.py 时无需 pytest
+    pass
 
 client = APP.app.test_client()
 

@@ -30,8 +30,35 @@ _tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
 config.DB_PATH = _tmp.name
 
 import models
+models.DB_PATH = _tmp.name  # pytest conftest 可能已提前绑定 models.DB_PATH，需同步
 models.init_db()
+
+# V1.6 起 init_db 不再自动插入台桌（生产安全：桌台仅由 migrate_tables.py 显式迁移）。
+# 测试库需自行按 config.MACHINES 播种台桌，否则开台会因「台桌不存在」失败。
+def _seed_test_machines():
+    import sqlite3 as _sq
+    _db = _sq.connect(config.DB_PATH)
+    for m in config.MACHINES:
+        _db.execute(
+            'INSERT OR IGNORE INTO machines (id, name, type, status, sort_order) VALUES (?, ?, ?, "idle", ?)',
+            [m['id'], m['name'], m['type'], m['sort_order']]
+        )
+    _db.commit()
+    _db.close()
+
+
+_seed_test_machines()
 import app as APP
+
+# pytest 下 conftest 每测试重建空库（且 V1.6 init_db 不再播种台桌），需在每测试内再次播种。
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _seed_machines_per_test(_isolate_db_per_test):
+        _seed_test_machines()
+except ImportError:  # 脚本直跑 python tests/xxx.py 时无需 pytest
+    pass
 
 client = APP.app.test_client()
 
@@ -271,6 +298,25 @@ def test_table_settlement_aggregation():
         return
     if abs(sess['product_total'] - product_total) > 0.01:
         bad('商品合计正确', f'product_total={sess["product_total"]} 期望{product_total}')
+        return
+
+    # 穿透一致：V1.6 统一收银流水视图中，整桌只产生一条 'session' 结算，
+    # grand_total = 台费实收(final_fee) + 本桌商品 = 实收合计，real_gmv_range 恰好等于实收（不双计/不漏计）。
+    import revenue as _rev
+    db = sqlite3.connect(config.DB_PATH)
+    db.row_factory = sqlite3.Row
+    biz_dt = db.execute('SELECT business_date FROM sessions WHERE id=?', [sid]).fetchone()['business_date']
+    rows = [r for r in _rev.iter_real_settlements(db, biz_dt) if r['session_id'] == sid]
+    db_gmv = _rev.real_gmv_range(db, biz_dt, biz_dt)
+    db.close()
+    if len(rows) != 1 or rows[0]['kind'] != 'session':
+        bad('整桌流水唯一性', f'期望1条session，实际{[(r["kind"], r["grand_total"]) for r in rows]}')
+        return
+    if abs(rows[0]['grand_total'] - res['actual_amount']) > 0.01:
+        bad('流水实收一致', f'grand_total={rows[0]["grand_total"]} 期望{res["actual_amount"]}')
+        return
+    if abs(db_gmv - res['actual_amount']) > 0.01:
+        bad('GMV不双计', f'real_gmv={db_gmv} 期望{res["actual_amount"]}')
         return
     ok('整桌汇总正确 / 只计一笔 / 不双计')
 
