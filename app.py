@@ -1764,9 +1764,15 @@ def api_table_checkout(session_id):
     if payment_method == 'member':
         if not member_id:
             return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
-        valid = any(dict(p).get('player_id') == member_id for p in unsettled_players)
-        member = db.execute("SELECT * FROM members WHERE id=? AND status='active'", [member_id]).fetchone()
-        if not member or not valid:
+        # 注意：members.id（会员表主键）与 players.id（玩家表主键）是两套独立自增ID，不可混用。
+        # 必须以 members.player_id 对比本桌未结玩家的 player_id 判断归属。
+        unsettled_player_ids = [dict(p).get('player_id') for p in unsettled_players]
+        placeholders = ','.join('?' * len(unsettled_player_ids)) if unsettled_player_ids else 'NULL'
+        member = db.execute(
+            f"SELECT * FROM members WHERE id=? AND player_id IN ({placeholders}) AND status='active'",
+            [member_id] + unsettled_player_ids
+        ).fetchone()
+        if not member:
             return jsonify({'error': 'PLAYER_NOT_MEMBER'}), 400
         if member['balance'] < actual_amount:
             return jsonify({'error': f'会员余额不足 (余额¥{member["balance"]:.2f}，需付¥{actual_amount:.2f})'}), 400

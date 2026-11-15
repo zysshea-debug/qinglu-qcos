@@ -62,6 +62,22 @@ def add_player(name):
     return r.get_json()['id']
 
 
+def add_member(player_id, balance):
+    r = client.post('/api/members', json={
+        'player_id': player_id, 'initial_balance': balance, 'payment_method': 'cash'
+    })
+    assert r.status_code == 201, r.data
+    return r.get_json()['id']
+
+
+def member_balance(mid):
+    db = sqlite3.connect(config.DB_PATH)
+    db.row_factory = sqlite3.Row
+    bal = db.execute('SELECT balance FROM members WHERE id=?', [mid]).fetchone()['balance']
+    db.close()
+    return bal
+
+
 def start_session(machine_id, players, start_time=None):
     payload = {'machine_id': machine_id, 'players': players}
     if start_time:
@@ -397,6 +413,79 @@ def test_existing_per_person_unchanged():
     ok('逐人结账与历史记录显示/统计/导出不变')
 
 
+# ===== 场景 7：会员表ID != 玩家表ID 时，整桌会员结账仍应成功 =====
+def test_table_member_checkout_when_member_id_differs_from_player_id():
+    print('\n[7] 会员表ID≠玩家表ID时仍可整桌会员结账')
+    # 先推进 players 自增ID，构造 members.id != players.id 的真实场景
+    # （旧代码用 session_players.player_id == members.id 判断归属，会误拒合法会员）
+    for i in range(3):
+        add_player(f'填充客G_{i}')
+    payer_pid = add_player('整桌会员G')
+    mid = add_member(payer_pid, 500.0)
+
+    db = sqlite3.connect(config.DB_PATH)
+    db.row_factory = sqlite3.Row
+    mrow = db.execute('SELECT id, player_id FROM members WHERE id=?', [mid]).fetchone()
+    db.close()
+    if mrow['id'] == mrow['player_id']:
+        bad('前置条件：会员表ID≠玩家表ID', f'members.id={mrow["id"]} player_id={mrow["player_id"]}')
+        return
+
+    other_pid = add_player('整桌旁观G')
+    sid, [sp1, _] = start_session(1, [
+        {'name': '整桌会员G', 'player_id': payer_pid},
+        {'name': '整桌旁观G', 'player_id': other_pid}
+    ])
+    sell_product(sid, sp1, product_id=1, quantity=1)
+    db = sqlite3.connect(config.DB_PATH)
+    db.row_factory = sqlite3.Row
+    product_total = db.execute(
+        'SELECT COALESCE(SUM(total),0) t FROM product_sales WHERE session_id=? AND status="UNSETTLED"', [sid]
+    ).fetchone()['t']
+    db.close()
+    agreed = 120.0
+    expected = round(agreed + product_total, 2)
+    before = member_balance(mid)
+
+    # 7a. 合法会员（members.id != player_id）整桌结账应成功
+    r = client.post(f'/api/sessions/{sid}/table-checkout', json={
+        'agreed_table_fee': agreed, 'actual_amount': expected,
+        'payment_method': 'member', 'member_id': mid,
+        'note': '', 'payer_name': '整桌会员G'
+    })
+    if r.status_code != 200:
+        bad('会员ID≠玩家ID整桌结账成功', f'status={r.status_code}, body={r.data[:400]}')
+        return
+    res = r.get_json()
+    if abs(res['actual_amount'] - expected) > 0.01:
+        bad('整桌实收正确', f'actual={res["actual_amount"]} expected={expected}')
+        return
+    after = member_balance(mid)
+    if abs(after - round(before - expected, 2)) > 0.01:
+        bad('会员余额正确扣减', f'before={before} after={after} 应扣={expected}')
+        return
+    ts = get_table_settlements(sid)
+    if len(ts) != 1 or ts[0]['payment_method'] != 'member':
+        bad('整桌结算记为会员支付', str(ts))
+        return
+    ok('会员表ID≠玩家表ID时仍可整桌会员结账（余额正确扣减）')
+
+    # 7b. 负向对照：会员不属于本桌未结玩家时仍必须被拒（防止放宽为任意会员可用）
+    sid2, _ = start_session(2, [{'name': '整桌旁观G', 'player_id': other_pid}])
+    # 构造一个完全不在 sid2 桌上的会员
+    stranger_pid = add_player('整桌陌生人G')
+    stranger_mid = add_member(stranger_pid, 500.0)
+    r = client.post(f'/api/sessions/{sid2}/table-checkout', json={
+        'agreed_table_fee': 100.0, 'actual_amount': 100.0,
+        'payment_method': 'member', 'member_id': stranger_mid,
+        'note': '', 'payer_name': ''
+    })
+    if r.status_code == 400 and b'PLAYER_NOT_MEMBER' in r.data:
+        ok('非本桌会员整桌结账仍被拒')
+    else:
+        bad('非本桌会员应被拒', f'status={r.status_code} body={r.data[:200]}')
+
+
 if __name__ == '__main__':
     login()
     test_per_person_no_diff_no_note()
@@ -405,5 +494,6 @@ if __name__ == '__main__':
     test_table_settlement_diff_requires_note()
     test_table_settlement_repeat_rejected()
     test_existing_per_person_unchanged()
+    test_table_member_checkout_when_member_id_differs_from_player_id()
     print(f'\n汇总: PASS={PASS}, FAIL={FAIL}')
     sys.exit(0 if FAIL == 0 else 1)
