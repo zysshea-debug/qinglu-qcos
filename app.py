@@ -4772,6 +4772,21 @@ def api_cashier_history_detail():
         'SELECT * FROM session_players WHERE session_id=? ORDER BY id', [session_id]).fetchall()]
     products = [dict(r) for r in db.execute(
         'SELECT * FROM product_sales WHERE session_id=? ORDER BY id', [session_id]).fetchall()]
+
+    # 核对信息：整桌结算事实（只读）。table_settlements 是该桌唯一不可变结算事实，
+    # 金额只取已保存字段，禁止按玩家金额推算整桌实收。极旧库无此表时降级为逐人模式，
+    # 保证历史桌局详情仍可打开（不因缺表报错、不伪造金额）。
+    _has_ts = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='table_settlements'"
+    ).fetchone()
+    table_settlement = None
+    if _has_ts:
+        _ts = db.execute(
+            'SELECT * FROM table_settlements WHERE session_id=? ORDER BY id DESC LIMIT 1',
+            [session_id]).fetchone()
+        table_settlement = dict(_ts) if _ts else None
+    settlement_mode = 'table' if table_settlement else 'player'
+
     sp_ids = [p['id'] for p in players]
     payments = []
     if sp_ids:
@@ -4812,6 +4827,22 @@ def api_cashier_history_detail():
         else:
             _p['actual_duration_minutes'] = _p.get('duration_minutes')
 
+    # 逐人对账字段（只读展示，绝不写回数据库）：
+    # 应收=结账时保存的 grand_total；实收/差额/备注来自结算时写入的字段。
+    # 旧记录 actual_amount 为空 => historical_compat，实收退回应收、差额0、备注空，
+    # 前端标为「历史未记录」，不伪造备注或差额。
+    for player in players:
+        player['expected_amount'] = float(player.get('grand_total') or 0)
+        player['historical_compat'] = player.get('actual_amount') is None
+        player['display_actual_amount'] = (
+            player['expected_amount'] if player['historical_compat']
+            else float(player['actual_amount'] or 0)
+        )
+        player['display_difference'] = (
+            0.0 if player['historical_compat'] else float(player.get('difference') or 0)
+        )
+        player['display_note'] = '' if player['historical_compat'] else (player.get('note') or '')
+
     return jsonify({
         'status': 'ok',
         'session': sess,
@@ -4819,6 +4850,8 @@ def api_cashier_history_detail():
         'products': products,
         'payments': payments,
         'audit': audit,
+        'settlement_mode': settlement_mode,
+        'table_settlement': table_settlement,
     })
 
 

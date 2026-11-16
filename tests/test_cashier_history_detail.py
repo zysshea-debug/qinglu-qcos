@@ -130,12 +130,8 @@ def test_player_diff_and_note():
     start = two_hours_ago()
     sid, [spid] = start_session(1, [{'name': '详情逐人差额', 'player_id': pid}], start)
 
-    db = sqlite3.connect(config.DB_PATH)
-    db.row_factory = sqlite3.Row
-    expected = float(db.execute(
-        'SELECT grand_total FROM session_players WHERE id=?', [spid]).fetchone()['grand_total'] or 0)
-    db.close()
-    actual = round(expected - 7.5, 2)
+    # 应收（grand_total）在结账时才写入，故用固定实收；断言时从详情读回应收核对。
+    actual = 12.34
 
     r = client.post(f'/api/sessions/{sid}/players/{spid}/checkout', json={
         'payment_method': 'cash', 'member_id': None, 'product_total': 0,
@@ -154,6 +150,10 @@ def test_player_diff_and_note():
     row = next((p for p in res['players'] if p['id'] == spid), None)
     if not row:
         bad('详情含该玩家', '未找到')
+        return
+    expected = float(row.get('grand_total') or 0)
+    if expected <= 0 or abs(actual - expected) < 0.01:
+        bad('应收/实收应有差异', f'expected={expected}, actual={actual}')
         return
     for field, want in (
         ('expected_amount', expected),
