@@ -2,6 +2,7 @@
 import os
 import sys
 import tempfile
+import sqlite3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -14,7 +15,31 @@ config.DB_PATH = _tmp.name
 import models
 models.DB_PATH = _tmp.name  # 同步绑定，避免写进其他模块的临时库
 models.init_db()
+
+# V1.6 起 init_db 不再自动插入台桌（生产安全：台桌仅由 migrate_tables.py 显式迁移）。
+# 测试库需自行按 config.MACHINES 播种台桌，否则开台会因「台桌不存在」失败。
+def _seed_test_machines():
+    db = sqlite3.connect(config.DB_PATH)
+    for m in config.MACHINES:
+        db.execute(
+            'INSERT OR IGNORE INTO machines (id, name, type, status, sort_order) VALUES (?, ?, ?, "idle", ?)',
+            [m['id'], m['name'], m['type'], m['sort_order']]
+        )
+    db.commit()
+    db.close()
+
+
+_seed_test_machines()
 import app as APP
+
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _seed_machines_per_test(_isolate_db_per_test):
+        _seed_test_machines()
+except ImportError:
+    pass
 
 client = APP.app.test_client()
 
