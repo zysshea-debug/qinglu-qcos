@@ -239,33 +239,76 @@ function rowActions(r, isAdmin) {
 function openDetail(id) {
     fetch('/api/cashier_history/detail?session_id=' + id).then(r => r.json()).then(res => {
         if (res.status !== 'ok') { alert(res.message); return; }
+        // 核对信息：备注/付款人等文本一律 HTML 转义，防止录入内容被当作页面代码执行。
+        const safe = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+        }[char]));
+        const noteText = (value) => value ? safe(value) : '无';
+        const payLabel = (method) => safe((window.PAYMENT_LABELS||{})[method] || method || '-');
+
         const s = res.session;
         let html = `<p><b>桌局 #${id}</b> 桌号：${s.machine_id} 状态：${s.status}
             营业日：${s.business_date||'-'} 操作员：${s.operator||'-'}</p>`;
         html += `<p class="small text-muted mb-2">开台时间：${short(s.start_time)||'-'} ｜ 实际结束：${short(s.effective_end_time)||'-'} ｜ 实际时长：${fmtDuration(s.actual_duration_minutes)}</p>`;
-        html += `<h6>玩家结账（${res.players.length}）</h6><table class="table table-sm">
-            <tr><th>玩家</th><th>开台</th><th>结束</th><th>实际时长</th><th>台费</th><th>商品</th><th>优惠</th><th>实收</th><th>支付方式</th></tr>`;
-        res.players.forEach(p => {
-            html += `<tr><td>${p.player_name||''}</td><td>${short(p.start_time)}</td><td>${short(p.end_time)}</td><td>${fmtDuration(p.actual_duration_minutes)}</td>
-                <td>¥${fmt(p.fee)}</td><td>¥${fmt(p.product_total)}</td><td>-¥${fmt(p.discount_amount)}</td>
-                <td>¥${fmt(p.grand_total)}</td><td>${(window.PAYMENT_LABELS||{})[p.payment_method]||p.payment_method||''}</td></tr>`;
-        });
-        html += `</table>`;
+
+        const isTable = res.settlement_mode === 'table';
+        if (isTable && res.table_settlement) {
+            // 整桌：金额唯一事实来自 table_settlement，绝不按玩家明细重新推算实收。
+            const ts = res.table_settlement;
+            html += `<h6>本桌结算核对 <span class="badge bg-primary">整桌结账</span></h6>
+                <table class="table table-sm table-bordered">
+                <tr><th>约定整桌台费</th><th>商品合计</th><th>应收</th><th>实收</th><th>差额</th></tr>
+                <tr><td>${money(ts.agreed_table_fee)}</td><td>${money(ts.product_total)}</td>
+                    <td>${money(ts.expected_amount)}</td><td>${money(ts.actual_amount)}</td>
+                    <td>${money(ts.difference)}</td></tr>
+                <tr><th>支付方式</th><th>付款人</th><th>操作人</th><th>结算时间</th><th>备注</th></tr>
+                <tr><td>${payLabel(ts.payment_method)}</td><td>${safe(ts.payer_name) || '未记录'}</td>
+                    <td>${safe(ts.operator) || '未记录'}</td><td>${short(ts.settled_at) || '未记录'}</td>
+                    <td>${noteText(ts.note)}</td></tr>
+                </table>`;
+        }
+
+        if (isTable) {
+            // 整桌玩家行只是解释性明细：展示计算台费与个人商品，不展示 grand_total（会被置零以防双计）。
+            html += `<h6>玩家明细（${res.players.length}）<span class="small text-muted fw-normal"> · 由整桌结算，无逐人实收</span></h6>
+                <table class="table table-sm">
+                <tr><th>玩家</th><th>开台</th><th>结束</th><th>实际时长</th><th>计算台费</th><th>个人商品</th><th>结算状态</th></tr>`;
+            res.players.forEach(p => {
+                html += `<tr><td>${safe(p.player_name)}</td><td>${short(p.start_time)}</td><td>${short(p.end_time)}</td>
+                    <td>${fmtDuration(p.actual_duration_minutes)}</td><td>${money(p.fee)}</td>
+                    <td>${money(p.product_total)}</td><td><span class="badge bg-info text-dark">由整桌结算</span></td></tr>`;
+            });
+            html += `</table>`;
+        } else {
+            // 逐人：逐行展示应收/实收/差额/备注/支付方式；历史记录备注列标「历史未记录」。
+            html += `<h6>玩家结账（${res.players.length}）</h6><table class="table table-sm">
+                <tr><th>玩家</th><th>开台</th><th>结束</th><th>实际时长</th><th>台费</th><th>商品</th><th>优惠</th><th>应收</th><th>实收</th><th>差额</th><th>备注</th><th>支付方式</th></tr>`;
+            res.players.forEach(p => {
+                const noteCell = p.historical_compat ? '<span class="text-muted">历史未记录</span>' : noteText(p.display_note);
+                html += `<tr><td>${safe(p.player_name)}</td><td>${short(p.start_time)}</td><td>${short(p.end_time)}</td>
+                    <td>${fmtDuration(p.actual_duration_minutes)}</td>
+                    <td>${money(p.fee)}</td><td>${money(p.product_total)}</td><td>-¥${fmt(p.discount_amount)}</td>
+                    <td>${money(p.expected_amount)}</td><td>${money(p.display_actual_amount)}</td>
+                    <td>${money(p.display_difference)}</td><td>${noteCell}</td>
+                    <td>${payLabel(p.payment_method)}</td></tr>`;
+            });
+            html += `</table>`;
+        }
         if (res.products.length) {
             html += `<h6>商品明细（${res.products.length}）</h6><table class="table table-sm">
                 <tr><th>商品</th><th>数量</th><th>单价</th><th>金额</th></tr>`;
-            res.products.forEach(p => { html += `<tr><td>${p.product_name}</td><td>${p.quantity}</td><td>¥${fmt(p.price)}</td><td>¥${fmt(p.total)}</td></tr>`; });
+            res.products.forEach(p => { html += `<tr><td>${safe(p.product_name)}</td><td>${p.quantity}</td><td>¥${fmt(p.price)}</td><td>¥${fmt(p.total)}</td></tr>`; });
             html += `</table>`;
         }
         if (res.payments.length) {
             html += `<h6>支付记录（${res.payments.length}）</h6><table class="table table-sm">
                 <tr><th>方式</th><th>金额</th><th>状态</th><th>时间</th></tr>`;
-            res.payments.forEach(p => { html += `<tr><td>${p.method}</td><td>¥${fmt(p.amount)}</td><td>${p.status}</td><td>${short(p.created_at)}</td></tr>`; });
+            res.payments.forEach(p => { html += `<tr><td>${safe(p.method)}</td><td>¥${fmt(p.amount)}</td><td>${safe(p.status)}</td><td>${short(p.created_at)}</td></tr>`; });
             html += `</table>`;
         }
         if (res.audit.length) {
             html += `<h6>审计（${res.audit.length}）</h6><ul class="small">`;
-            res.audit.forEach(a => { html += `<li>${a.action} / ${a.operator} / ${a.reason||''} / ${short(a.changed_at)}</li>`; });
+            res.audit.forEach(a => { html += `<li>${safe(a.action)} / ${safe(a.operator)} / ${safe(a.reason||'')} / ${short(a.changed_at)}</li>`; });
             html += `</ul>`;
         }
         document.getElementById('detailBody').innerHTML = html;
